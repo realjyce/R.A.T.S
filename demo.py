@@ -99,8 +99,29 @@ with st.sidebar:
     st.caption("license: mit_open_source")
 
 # main_interface: telemetry_display
-st.title("🛰️ r.a.t.s. terminal_node_0xff12")
+st.title("🛰️ R.A.T.S. terminal_node_0xff12")
 st.write("autonomous inventory verification via edge-inference")
+
+# 3d_digital_twin_view
+st.write("### 🧊 digital_twin_simulation [node_0xff12]")
+sim_col1, sim_col2 = st.columns([2, 1])
+
+with sim_col1:
+    # logic: show a "full" or "empty" 3D render based on total stock
+    total_stock = sum(st.session_state.inventory.values())
+    
+    if total_stock > 10:
+        # replace with a link to a 3D render of a full shelf
+        st.image("https://img.freepik.com/free-photo/3d-render-supermarket-shelf-with-products_23-2148937082.jpg", 
+                 caption="status: nominal_load", use_container_width=True)
+    else:
+        # replace with a link to a 3D render of a depleted shelf
+        st.image("https://img.freepik.com/free-photo/empty-white-shelves-supermarket_23-2148102604.jpg", 
+                 caption="status: critical_depletion", use_container_width=True)
+
+with sim_col2:
+    st.info("the digital twin synchronizes with the xiao_s3 spatial coordinates to map product placement in 3D space.")
+    st.button("refresh_spatial_map")
 
 # layout: inventory_metrics
 c1, c2, c3 = st.columns(3)
