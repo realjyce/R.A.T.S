@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//c/Users/post9/OneDrive/Desktop/intelligent edge system/**)",
+      "Bash(python -c ' *)",
+      "Bash(pip install *)"
+    ]
+  }
+}

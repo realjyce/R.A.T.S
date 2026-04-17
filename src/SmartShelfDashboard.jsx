@@ -1,681 +1,423 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 
-const PRODUCTS = [
-  { id: "coke", label: "Coke Can", color: "#E53935", icon: "🥤", maxStock: 6, weight: "355g" },
-  { id: "ramen", label: "Ramen Cup", color: "#FF9800", icon: "🍜", maxStock: 5, weight: "64g" },
-  { id: "chips", label: "Chip Bag", color: "#43A047", icon: "🥨", maxStock: 4, weight: "150g" },
+const HARDWARE = [
+  { name: "XIAO ESP32-S3 Sense", role: "Edge Device + Camera", color: "#38BDF8", icon: "🧠" },
+  { name: "PIR Sensor AM312",    role: "Human Mini Detector",  color: "#FBBF24", icon: "👁" },
+  { name: "FOMO MobileNetV2",    role: "On-Device ML Model",   color: "#22C55E", icon: "🤖" },
+  { name: "Edge Impulse",        role: "ML Training Platform", color: "#A78BFA", icon: "⚙️" },
 ];
 
-const THRESHOLD = 2;
+const PRODUCTS = [
+  { id: "bottle", label: "Bottle", icon: "🍶", color: "#38BDF8", max: 6 },
+  { id: "can",    label: "Can",    icon: "🥫", color: "#F97316", max: 8 },
+  { id: "chips",  label: "Chips",  icon: "🥨", color: "#22C55E", max: 5 },
+];
 
-function generateShelfGrid(products) {
-  const grid = [];
-  products.forEach((p) => {
-    for (let i = 0; i < p.maxStock; i++) {
-      grid.push({ productId: p.id, slot: i, occupied: i < p.stock });
-    }
-  });
-  return grid;
+function randomBetween(a, b) {
+  return Math.floor(Math.random() * (b - a + 1)) + a;
 }
 
 function formatTime(d) {
   return d.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
 
-function randomBetween(a, b) {
-  return Math.floor(Math.random() * (b - a + 1)) + a;
-}
-
-// --- Sparkline mini chart ---
-function Sparkline({ data, color, width = 120, height = 32 }) {
-  if (!data || data.length < 2) return null;
-  const max = Math.max(...data);
-  const min = Math.min(...data);
-  const range = max - min || 1;
-  const points = data
-    .map((v, i) => {
-      const x = (i / (data.length - 1)) * width;
-      const y = height - ((v - min) / range) * (height - 4) - 2;
-      return `${x},${y}`;
-    })
-    .join(" ");
-  return (
-    <svg width={width} height={height} style={{ display: "block" }}>
-      <polyline
-        points={points}
-        fill="none"
-        stroke={color}
-        strokeWidth="2"
-        strokeLinejoin="round"
-        strokeLinecap="round"
-      />
-    </svg>
-  );
-}
-
-// --- Main Dashboard ---
 export default function SmartShelfDashboard() {
-  const [stocks, setStocks] = useState(
-    PRODUCTS.reduce((acc, p) => ({ ...acc, [p.id]: p.maxStock }), {})
-  );
-  const [alerts, setAlerts] = useState([]);
-  const [inferenceLog, setInferenceLog] = useState([]);
-  const [latencyHistory, setLatencyHistory] = useState([]);
-  const [powerHistory, setPowerHistory] = useState([]);
-  const [deviceStatus, setDeviceStatus] = useState("sleep");
-  const [simRunning, setSimRunning] = useState(false);
-  const [totalInferences, setTotalInferences] = useState(0);
-  const [pirTriggers, setPirTriggers] = useState(0);
-  const [lastInference, setLastInference] = useState(null);
-  const simRef = useRef(null);
-
-  const runInference = useCallback(
-    (updatedStocks) => {
-      const latency = randomBetween(120, 210);
-      const now = new Date();
-      setDeviceStatus("inferring");
-      setTotalInferences((n) => n + 1);
-      setLastInference(now);
-      setLatencyHistory((h) => [...h.slice(-29), latency]);
-      setPowerHistory((h) => [...h.slice(-29), randomBetween(85, 160)]);
-
-      const detections = PRODUCTS.map((p) => ({
-        label: p.label,
-        count: updatedStocks[p.id],
-        confidence: (0.82 + Math.random() * 0.16).toFixed(2),
-      }));
-
-      setInferenceLog((log) => [
-        {
-          time: formatTime(now),
-          latency,
-          detections,
-          id: Date.now(),
-        },
-        ...log.slice(0, 19),
-      ]);
-
-      // Check thresholds
-      PRODUCTS.forEach((p) => {
-        if (updatedStocks[p.id] <= THRESHOLD && updatedStocks[p.id] >= 0) {
-          setAlerts((a) => [
-            {
-              time: formatTime(now),
-              product: p.label,
-              icon: p.icon,
-              count: updatedStocks[p.id],
-              severity: updatedStocks[p.id] === 0 ? "critical" : "warning",
-              id: Date.now() + p.id,
-            },
-            ...a.slice(0, 14),
-          ]);
-        }
-      });
-
-      setTimeout(() => setDeviceStatus("sleep"), 1800);
-    },
-    []
-  );
-
-  // PIR trigger simulation
-  const triggerPIR = useCallback(() => {
-    setPirTriggers((n) => n + 1);
-    setDeviceStatus("waking");
-    setTimeout(() => {
-      // Randomly remove an item
-      setStocks((prev) => {
-        const available = PRODUCTS.filter((p) => prev[p.id] > 0);
-        if (available.length === 0) return prev;
-        const pick = available[Math.floor(Math.random() * available.length)];
-        const updated = { ...prev, [pick.id]: Math.max(0, prev[pick.id] - 1) };
-        runInference(updated);
-        return updated;
-      });
-    }, 600);
-  }, [runInference]);
-
-  // Restock
-  const restockAll = useCallback(() => {
-    const full = PRODUCTS.reduce((acc, p) => ({ ...acc, [p.id]: p.maxStock }), {});
-    setStocks(full);
-    setDeviceStatus("waking");
-    setTimeout(() => runInference(full), 400);
-  }, [runInference]);
-
-  // Manual adjust
-  const adjustStock = useCallback(
-    (id, delta) => {
-      setStocks((prev) => {
-        const p = PRODUCTS.find((x) => x.id === id);
-        const next = Math.max(0, Math.min(p.maxStock, prev[id] + delta));
-        const updated = { ...prev, [id]: next };
-        setDeviceStatus("waking");
-        setTimeout(() => runInference(updated), 300);
-        return updated;
-      });
-    },
-    [runInference]
-  );
-
-  // Auto-sim
-  useEffect(() => {
-    if (simRunning) {
-      simRef.current = setInterval(() => triggerPIR(), randomBetween(2500, 5000));
-    } else {
-      clearInterval(simRef.current);
-    }
-    return () => clearInterval(simRef.current);
-  }, [simRunning, triggerPIR]);
-
-  // Computed
-  const avgLatency =
-    latencyHistory.length > 0
-      ? (latencyHistory.reduce((a, b) => a + b, 0) / latencyHistory.length).toFixed(0)
-      : "—";
-  const fps = latencyHistory.length > 0 ? (1000 / latencyHistory[latencyHistory.length - 1]).toFixed(1) : "—";
-
-  // --- STYLES ---
-  const font = `'JetBrains Mono', 'Fira Code', 'SF Mono', 'Consolas', monospace`;
-  const bg = "#0B0E14";
-  const surface = "#141922";
-  const surfaceAlt = "#1A2030";
-  const border = "#232D3F";
+  const font        = `'JetBrains Mono', 'Fira Code', 'SF Mono', 'Consolas', monospace`;
+  const bg          = "#0B0E14";
+  const surface     = "#141922";
+  const surfaceAlt  = "#1A2030";
+  const border      = "#232D3F";
   const textPrimary = "#E2E8F0";
   const textSecondary = "#7B8BA5";
-  const accent = "#38BDF8";
-  const alertYellow = "#FBBF24";
-  const alertRed = "#EF4444";
-  const green = "#22C55E";
+  const accent      = "#38BDF8";
+  const alertRed    = "#EF4444";
+  const green       = "#22C55E";
+
+  // ── source toggle ──────────────────────────────────────────────
+  const [camSource, setCamSource] = useState("mockup"); // "xiao" | "mockup"
+  const [xiaoUrl,   setXiaoUrl]   = useState("http://192.168.4.1/stream");
+
+  // ── camera / inference state ───────────────────────────────────
+  const videoRef  = useRef(null);
+  const canvasRef = useRef(null);
+  const streamRef = useRef(null);
+  const inferRef  = useRef(null);
+
+  const [camState,       setCamState]       = useState("idle"); // idle | requesting | active | error
+  const [camError,       setCamError]       = useState("");
+  const [inferLog,       setInferLog]       = useState([]);
+  const [lastDetections, setLastDetections] = useState([]);
+  const [totalRuns,      setTotalRuns]      = useState(0);
+  const [avgLatency,     setAvgLatency]     = useState(null);
+  const [stocks,         setStocks]         = useState(null); // null = no data yet
+  const latencies = useRef([]);
+
+  // ── draw mock FOMO detections ──────────────────────────────────
+  const drawDetections = useCallback((detections, w, h) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    canvas.width  = w;
+    canvas.height = h;
+    ctx.clearRect(0, 0, w, h);
+    detections.forEach(({ x, y, label, color, conf }) => {
+      const bx = x - 18, by = y - 18, bw = 36, bh = 36;
+      ctx.strokeStyle = color;
+      ctx.lineWidth   = 2;
+      ctx.strokeRect(bx, by, bw, bh);
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.arc(x, y, 3, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = color;
+      ctx.font = "bold 10px monospace";
+      ctx.fillText(`${label} ${conf}`, bx, by - 4);
+    });
+  }, []);
+
+  // ── run one mock inference cycle ───────────────────────────────
+  const runInference = useCallback(() => {
+    const video  = videoRef.current;
+    const canvas = canvasRef.current;
+    if (!video || !canvas || video.readyState < 2) return;
+
+    const t0 = performance.now();
+    const w  = video.videoWidth  || 320;
+    const h  = video.videoHeight || 240;
+
+    const count = randomBetween(1, 5);
+    const detections = Array.from({ length: count }, () => {
+      const p = PRODUCTS[randomBetween(0, PRODUCTS.length - 1)];
+      return {
+        x: randomBetween(30, w - 30),
+        y: randomBetween(30, h - 30),
+        label: p.label,
+        color: p.color,
+        conf:  (0.80 + Math.random() * 0.18).toFixed(2),
+        id:    p.id,
+      };
+    });
+
+    drawDetections(detections, w, h);
+
+    const latency = randomBetween(120, 210) + Math.round(performance.now() - t0);
+    latencies.current = [...latencies.current.slice(-29), latency];
+    const avg = Math.round(latencies.current.reduce((a, b) => a + b, 0) / latencies.current.length);
+
+    const counts = {};
+    PRODUCTS.forEach((p) => { counts[p.id] = 0; });
+    detections.forEach((d) => { counts[d.id] = (counts[d.id] || 0) + 1; });
+
+    const now = new Date();
+    setLastDetections(detections);
+    setInferLog((prev) => [{ time: formatTime(now), latency, counts, id: Date.now() }, ...prev.slice(0, 9)]);
+    setTotalRuns((n) => n + 1);
+    setAvgLatency(avg);
+    setStocks(counts);
+
+  }, [drawDetections]);
+
+  // ── start ──────────────────────────────────────────────────────
+  const startCamera = useCallback(async () => {
+    setCamState("requesting");
+    setCamError("");
+    try {
+      if (camSource === "mockup") {
+        // Browser webcam / phone camera
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } },
+        });
+        streamRef.current = stream;
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+          videoRef.current.src = "";
+          await videoRef.current.play();
+        }
+      } else {
+        // XIAO MJPEG stream
+        if (videoRef.current) {
+          videoRef.current.srcObject = null;
+          videoRef.current.src = xiaoUrl;
+          await videoRef.current.play();
+        }
+      }
+      setCamState("active");
+      inferRef.current = setInterval(runInference, 2000);
+    } catch (err) {
+      setCamState("error");
+      setCamError(err.message || "Could not connect");
+    }
+  }, [camSource, xiaoUrl, runInference]);
+
+  // ── stop ───────────────────────────────────────────────────────
+  const stopCamera = useCallback(() => {
+    clearInterval(inferRef.current);
+    streamRef.current?.getTracks().forEach((t) => t.stop());
+    if (videoRef.current) { videoRef.current.srcObject = null; videoRef.current.src = ""; }
+    if (canvasRef.current) {
+      const ctx = canvasRef.current.getContext("2d");
+      ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
+    }
+    setCamState("idle");
+    setLastDetections([]);
+    setStocks(null);
+  }, []);
+
+  // stop when switching source
+  useEffect(() => { stopCamera(); }, [camSource]); // eslint-disable-line
+
+  useEffect(() => () => {
+    clearInterval(inferRef.current);
+    streamRef.current?.getTracks().forEach((t) => t.stop());
+  }, []);
+
+  // ── labels ─────────────────────────────────────────────────────
+  const sourceLabel = camSource === "xiao" ? "XIAO ESP32-S3 (MJPEG)" : "Mockup Cam — Phone / Webcam";
+  const idleHint    = camSource === "xiao"
+    ? <>Enter the device IP above then press <strong style={{ color: accent }}>Connect</strong></>
+    : <>Press <strong style={{ color: accent }}>Start Camera</strong> to begin mock feed</>;
 
   return (
-    <div
-      style={{
-        fontFamily: font,
-        background: bg,
-        color: textPrimary,
-        minHeight: "100vh",
-        padding: "0",
-        margin: "0",
-        fontSize: "13px",
-        lineHeight: 1.5,
-      }}
-    >
+    <div style={{ fontFamily: font, background: bg, color: textPrimary, minHeight: "100vh", margin: 0, padding: 0, fontSize: "13px", lineHeight: 1.5 }}>
+
       {/* HEADER */}
-      <div
-        style={{
-          background: `linear-gradient(90deg, ${surface} 0%, #0F1923 100%)`,
-          borderBottom: `1px solid ${border}`,
-          padding: "16px 28px",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          flexWrap: "wrap",
-          gap: 12,
-        }}
-      >
-        <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
-          <div
-            style={{
-              width: 36,
-              height: 36,
-              borderRadius: 8,
-              background: `linear-gradient(135deg, ${accent}, #6366F1)`,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              fontSize: 18,
-              fontWeight: 800,
-              color: "#fff",
-              letterSpacing: -1,
-            }}
-          >
-            ES
-          </div>
-          <div>
-            <div style={{ fontWeight: 700, fontSize: 16, letterSpacing: "0.02em" }}>
-              Smart Shelf — Edge Dashboard
-            </div>
-            <div style={{ color: textSecondary, fontSize: 11, marginTop: 1 }}>
-              XIAO ESP32-S3 Sense &middot; FOMO MobileNetV2 &middot; Intelligent Edge System
-            </div>
-          </div>
-        </div>
-        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-          <StatusPill
-            label={deviceStatus === "sleep" ? "Deep Sleep" : deviceStatus === "waking" ? "PIR Triggered" : "Inferring"}
-            color={deviceStatus === "sleep" ? textSecondary : deviceStatus === "waking" ? alertYellow : accent}
-            pulse={deviceStatus !== "sleep"}
-          />
-          <button onClick={triggerPIR} style={btnStyle(accent)}>
-            ⚡ Trigger PIR
-          </button>
-          <button onClick={() => setSimRunning((s) => !s)} style={btnStyle(simRunning ? alertRed : green)}>
-            {simRunning ? "■ Stop Sim" : "▶ Auto Sim"}
-          </button>
-          <button onClick={restockAll} style={btnStyle("#8B5CF6")}>
-            ↻ Restock All
-          </button>
+      <div style={{ background: `linear-gradient(90deg, ${surface} 0%, #0F1923 100%)`, borderBottom: `1px solid ${border}`, padding: "16px 28px", display: "flex", alignItems: "center" }}>
+        <div style={{ fontWeight: 700, fontSize: 17, letterSpacing: "0.04em" }}>
+          R.A.T.S &mdash; Real-Time Auto Tracking Shelf
         </div>
       </div>
 
       {/* BODY */}
-      <div style={{ padding: "20px 24px", display: "flex", flexDirection: "column", gap: 18 }}>
-        {/* TOP ROW: Metrics */}
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(155px, 1fr))", gap: 12 }}>
-          <MetricCard label="Device Status" value={deviceStatus.toUpperCase()} sub="XIAO ESP32-S3" color={accent} />
-          <MetricCard label="Total Inferences" value={totalInferences} sub="FOMO runs" color={accent} />
-          <MetricCard label="PIR Triggers" value={pirTriggers} sub="AM312 events" color={alertYellow} />
-          <MetricCard label="Avg Latency" value={`${avgLatency}ms`} sub="inference time" color={green} />
-          <MetricCard label="Est. FPS" value={fps} sub="frames/sec" color="#a78bfa" />
-          <MetricCard
-            label="Last Inference"
-            value={lastInference ? formatTime(lastInference) : "—"}
-            sub="timestamp"
-            color={textSecondary}
-          />
-        </div>
+      <div style={{ padding: "24px 28px", display: "flex", flexDirection: "column", gap: 28 }}>
 
-        {/* MID ROW: Shelf + Product Cards */}
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
-          {/* SHELF GRID */}
-          <Card title="📷 Shelf Camera View (FOMO Grid)" style={{ minHeight: 220 }}>
-            <div style={{ display: "flex", gap: 18, flexWrap: "wrap", marginTop: 8 }}>
-              {PRODUCTS.map((p) => (
-                <div key={p.id}>
-                  <div
-                    style={{
-                      fontSize: 11,
-                      color: textSecondary,
-                      marginBottom: 6,
-                      display: "flex",
-                      alignItems: "center",
-                      gap: 5,
-                    }}
-                  >
-                    <span
-                      style={{
-                        width: 8,
-                        height: 8,
-                        borderRadius: "50%",
-                        background: p.color,
-                        display: "inline-block",
-                      }}
-                    />
-                    {p.label}
-                  </div>
-                  <div
-                    style={{
-                      display: "grid",
-                      gridTemplateColumns: `repeat(${Math.min(p.maxStock, 3)}, 42px)`,
-                      gap: 5,
-                    }}
-                  >
-                    {Array.from({ length: p.maxStock }).map((_, i) => {
-                      const occupied = i < stocks[p.id];
-                      return (
-                        <div
-                          key={i}
-                          style={{
-                            width: 42,
-                            height: 42,
-                            borderRadius: 6,
-                            background: occupied ? p.color + "22" : surfaceAlt,
-                            border: occupied ? `2px solid ${p.color}` : `1px dashed ${border}`,
-                            display: "flex",
-                            alignItems: "center",
-                            justifyContent: "center",
-                            fontSize: occupied ? 20 : 12,
-                            color: occupied ? p.color : border,
-                            transition: "all 0.3s",
-                            position: "relative",
-                          }}
-                        >
-                          {occupied ? p.icon : "✕"}
-                          {occupied && (
-                            <div
-                              style={{
-                                position: "absolute",
-                                bottom: -2,
-                                right: -2,
-                                width: 8,
-                                height: 8,
-                                borderRadius: "50%",
-                                background: green,
-                                border: `2px solid ${surface}`,
-                              }}
-                            />
-                          )}
-                        </div>
-                      );
-                    })}
+        {/* HARDWARE GRID */}
+        <div>
+          <SectionLabel>System Components</SectionLabel>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 16 }}>
+            {HARDWARE.map((hw) => (
+              <div key={hw.name} style={{ background: surfaceAlt, border: `1px solid ${border}`, borderTop: `3px solid ${hw.color}`, borderRadius: 10, padding: "16px 18px" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <span style={{ fontSize: 22 }}>{hw.icon}</span>
+                  <div>
+                    <div style={{ fontWeight: 700, fontSize: 13, color: textPrimary }}>{hw.name}</div>
+                    <div style={{ fontSize: 11, color: hw.color, marginTop: 1 }}>{hw.role}</div>
                   </div>
                 </div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* CAMERA PANEL + INFERENCE */}
+        <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+
+          {/* Camera panel */}
+          <div style={{ background: surfaceAlt, border: `1px solid ${border}`, borderRadius: 10, overflow: "hidden" }}>
+            <div style={{ padding: "8px 14px", borderBottom: `1px solid ${border}`, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+              {/* Source toggle */}
+              <div style={{ display: "flex", gap: 0, background: bg, border: `1px solid ${border}`, borderRadius: 6, overflow: "hidden" }}>
+                {["xiao", "mockup"].map((src) => {
+                  const active = camSource === src;
+                  const label  = src === "xiao" ? "🔌 XIAO ESP32-S3" : "💻 Mockup Cam";
+                  return (
+                    <button
+                      key={src}
+                      onClick={() => setCamSource(src)}
+                      style={{
+                        padding: "5px 16px",
+                        border: "none",
+                        borderRight: src === "xiao" ? `1px solid ${border}` : "none",
+                        background: active ? accent + "22" : "transparent",
+                        color:      active ? accent : textSecondary,
+                        fontFamily: font, fontSize: 11,
+                        fontWeight: active ? 700 : 400,
+                        cursor: "pointer", letterSpacing: "0.03em", transition: "all 0.15s",
+                      }}
+                    >
+                      {label}
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* XIAO URL input */}
+              {camSource === "xiao" && (
+                <input
+                  value={xiaoUrl}
+                  onChange={(e) => setXiaoUrl(e.target.value)}
+                  placeholder="http://192.168.4.1/stream"
+                  style={{
+                    background: bg, border: `1px solid ${border}`, borderRadius: 6,
+                    color: textPrimary, fontFamily: font, fontSize: 11,
+                    padding: "4px 10px", width: 240, outline: "none", flex: 1,
+                  }}
+                />
+              )}
+
+              {/* Live status */}
+              <span style={{ display: "flex", alignItems: "center", gap: 6, color: camState === "active" ? alertRed : textSecondary, fontWeight: 700, fontSize: 11, whiteSpace: "nowrap" }}>
+                {camState === "active" && (
+                  <span style={{ width: 7, height: 7, borderRadius: "50%", background: alertRed, display: "inline-block", animation: "blink 1.2s infinite" }} />
+                )}
+                {camState === "active" ? "LIVE" : camState === "requesting" ? "CONNECTING…" : "OFFLINE"}
+              </span>
+            </div>
+
+            {/* Viewport */}
+            <div style={{ position: "relative", width: "100%", aspectRatio: "16/7", background: "#060A0F", display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden" }}>
+              <video ref={videoRef} muted playsInline style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover", display: camState === "active" ? "block" : "none" }} />
+              <canvas ref={canvasRef} style={{ position: "absolute", inset: 0, width: "100%", height: "100%", pointerEvents: "none", display: camState === "active" ? "block" : "none" }} />
+              <div style={{ position: "absolute", inset: 0, backgroundImage: "repeating-linear-gradient(0deg, transparent, transparent 3px, rgba(255,255,255,0.015) 3px, rgba(255,255,255,0.015) 4px)", pointerEvents: "none" }} />
+              {[
+                { top: 12, left: 12,  borderTop: `2px solid ${accent}`, borderLeft:  `2px solid ${accent}` },
+                { top: 12, right: 12, borderTop: `2px solid ${accent}`, borderRight: `2px solid ${accent}` },
+                { bottom: 12, left: 12,  borderBottom: `2px solid ${accent}`, borderLeft:  `2px solid ${accent}` },
+                { bottom: 12, right: 12, borderBottom: `2px solid ${accent}`, borderRight: `2px solid ${accent}` },
+              ].map((s, i) => (
+                <div key={i} style={{ position: "absolute", width: 18, height: 18, ...s }} />
               ))}
+              {camState !== "active" && (
+                <div style={{ textAlign: "center", color: "#2A3A50", fontSize: 12, zIndex: 1 }}>
+                  <div style={{ fontSize: 36, marginBottom: 8 }}>{camSource === "xiao" ? "🔌" : "📷"}</div>
+                  {camState === "error"
+                    ? <div style={{ color: alertRed }}>{camError}</div>
+                    : <div>{idleHint}</div>
+                  }
+                </div>
+              )}
             </div>
-            <div style={{ marginTop: 14, fontSize: 10, color: textSecondary }}>
-              Grid shows FOMO centroid detections · 96×96 grayscale input · Bounding boxes → centroids
-            </div>
-          </Card>
 
-          {/* PRODUCT CARDS */}
-          <Card title="📦 Inventory Status">
-            <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 4 }}>
-              {PRODUCTS.map((p) => {
-                const pct = (stocks[p.id] / p.maxStock) * 100;
-                const low = stocks[p.id] <= THRESHOLD;
-                const empty = stocks[p.id] === 0;
-                return (
-                  <div
-                    key={p.id}
-                    style={{
-                      background: surfaceAlt,
-                      borderRadius: 8,
-                      padding: "10px 14px",
-                      border: `1px solid ${empty ? alertRed + "60" : low ? alertYellow + "40" : border}`,
-                      display: "flex",
-                      alignItems: "center",
-                      gap: 12,
-                    }}
-                  >
-                    <span style={{ fontSize: 22 }}>{p.icon}</span>
+            {/* Controls */}
+            <div style={{ padding: "10px 14px", borderTop: `1px solid ${border}`, display: "flex", gap: 8 }}>
+              {camState !== "active"
+                ? <button onClick={startCamera} style={btnStyle(accent)}>{camSource === "xiao" ? "🔌 Connect" : "▶ Start Camera"}</button>
+                : <button onClick={stopCamera}  style={btnStyle(alertRed)}>■ Stop</button>
+              }
+              <span style={{ fontSize: 11, color: textSecondary, alignSelf: "center" }}>
+                {camState === "active" ? `Inference every 2 s · ${totalRuns} run${totalRuns !== 1 ? "s" : ""}` : camSource === "xiao" ? "Requires XIAO on the same network" : "Open in phone browser for rear camera"}
+              </span>
+            </div>
+          </div>
+
+        {/* PRODUCT STOCK GRID */}
+        <div>
+          <SectionLabel>Product Stock</SectionLabel>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 16 }}>
+            {PRODUCTS.map((p) => {
+              const count  = stocks ? stocks[p.id] : null;
+              const pct    = count != null ? Math.round((count / p.max) * 100) : null;
+              const status = count == null ? "idle"
+                : count === 0  ? "empty"
+                : count <= 3   ? "low"
+                :                "ok";
+
+              const alertYellow  = "#FBBF24";
+              const isAlert      = status === "empty" || status === "low";
+              const alertColor   = status === "empty" ? alertRed : alertYellow;
+              const statusColor  = { idle: textSecondary, empty: alertRed, low: alertYellow, ok: green }[status];
+
+              return (
+                <div
+                  key={p.id}
+                  style={{
+                    background: isAlert
+                      ? (status === "empty" ? alertRed + "0D" : alertYellow + "0A")
+                      : surfaceAlt,
+                    border: `1px solid ${isAlert ? alertColor + "70" : border}`,
+                    borderTop: `3px solid ${isAlert ? alertColor : p.color}`,
+                    borderRadius: 10,
+                    padding: "18px 20px",
+                    boxShadow: isAlert ? `0 0 18px ${alertColor}22` : "none",
+                    transition: "all 0.4s ease",
+                  }}
+                >
+                  {/* Icon + name */}
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
+                    <span style={{ fontSize: 28 }}>{p.icon}</span>
                     <div style={{ flex: 1 }}>
-                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                        <span style={{ fontWeight: 600, fontSize: 13 }}>{p.label}</span>
-                        <span
-                          style={{
-                            fontSize: 11,
-                            padding: "2px 8px",
-                            borderRadius: 20,
-                            background: empty
-                              ? alertRed + "22"
-                              : low
-                              ? alertYellow + "22"
-                              : green + "18",
-                            color: empty ? alertRed : low ? alertYellow : green,
-                            fontWeight: 600,
-                          }}
-                        >
-                          {stocks[p.id]} / {p.maxStock}
-                        </span>
-                      </div>
-                      <div
-                        style={{
-                          marginTop: 6,
-                          height: 6,
-                          borderRadius: 3,
-                          background: border,
-                          overflow: "hidden",
-                        }}
-                      >
-                        <div
-                          style={{
-                            height: "100%",
-                            width: `${pct}%`,
-                            borderRadius: 3,
-                            background: empty ? alertRed : low ? alertYellow : green,
-                            transition: "width 0.5s ease",
-                          }}
-                        />
+                      <div style={{ fontWeight: 700, fontSize: 14, color: textPrimary }}>{p.label}</div>
+                      <div style={{ fontSize: 10, color: statusColor, fontWeight: 600, marginTop: 2 }}>
+                        {{ idle: "No data", empty: "OUT OF STOCK", low: "LOW STOCK", ok: "In Stock" }[status]}
                       </div>
                     </div>
-                    <div style={{ display: "flex", gap: 4 }}>
-                      <MiniBtn onClick={() => adjustStock(p.id, -1)}>−</MiniBtn>
-                      <MiniBtn onClick={() => adjustStock(p.id, 1)}>+</MiniBtn>
-                    </div>
+                    {/* Alert badge */}
+                    {isAlert && (
+                      <span style={{
+                        fontSize: 10, fontWeight: 700, padding: "3px 8px", borderRadius: 20,
+                        background: alertColor + "22", color: alertColor,
+                        border: `1px solid ${alertColor}50`,
+                        animation: "blink 1.4s infinite",
+                      }}>
+                        {status === "empty" ? "⛔ CRITICAL" : "⚠ WARNING"}
+                      </span>
+                    )}
                   </div>
-                );
-              })}
-            </div>
-            <div style={{ marginTop: 8, fontSize: 10, color: textSecondary }}>
-              Restock threshold: ≤ {THRESHOLD} units → alert triggered
-            </div>
-          </Card>
-        </div>
 
-        {/* BOTTOM ROW: Charts + Alerts + Logs */}
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 14 }}>
-          {/* Latency Chart */}
-          <Card title="⏱ Inference Latency">
-            <Sparkline data={latencyHistory} color={accent} width={260} height={60} />
-            <div style={{ marginTop: 6, fontSize: 10, color: textSecondary }}>
-              Last 30 inferences · Target: &lt;200ms on ESP32-S3
-            </div>
-          </Card>
-
-          {/* Power Chart */}
-          <Card title="🔋 Power Draw (mA)">
-            <Sparkline data={powerHistory} color={alertYellow} width={260} height={60} />
-            <div style={{ marginTop: 6, fontSize: 10, color: textSecondary }}>
-              Deep sleep: ~15µA · Active inference: 85–160mA
-            </div>
-          </Card>
-
-          {/* Alerts */}
-          <Card title="🚨 Restock Alerts" style={{ maxHeight: 180, overflow: "auto" }}>
-            {alerts.length === 0 ? (
-              <div style={{ color: textSecondary, fontSize: 11, padding: "10px 0" }}>
-                No alerts yet — trigger PIR or run simulation
-              </div>
-            ) : (
-              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                {alerts.map((a) => (
-                  <div
-                    key={a.id}
-                    style={{
-                      fontSize: 11,
-                      padding: "4px 8px",
-                      borderRadius: 4,
-                      background: a.severity === "critical" ? alertRed + "15" : alertYellow + "12",
-                      borderLeft: `3px solid ${a.severity === "critical" ? alertRed : alertYellow}`,
-                      display: "flex",
-                      gap: 6,
-                      alignItems: "center",
-                    }}
-                  >
-                    <span>{a.icon}</span>
-                    <span style={{ color: textSecondary, minWidth: 65 }}>{a.time}</span>
-                    <span style={{ fontWeight: 600 }}>{a.product}</span>
-                    <span style={{ color: a.severity === "critical" ? alertRed : alertYellow }}>
-                      {a.count === 0 ? "OUT OF STOCK" : `LOW: ${a.count} left`}
+                  {/* Count */}
+                  <div style={{ display: "flex", alignItems: "baseline", gap: 6, marginBottom: 10 }}>
+                    <span style={{ fontSize: 40, fontWeight: 800, color: count == null ? textSecondary : statusColor, lineHeight: 1 }}>
+                      {count ?? "—"}
                     </span>
+                    {count != null && (
+                      <span style={{ fontSize: 13, color: textSecondary }}>/ {p.max}</span>
+                    )}
                   </div>
-                ))}
-              </div>
-            )}
-          </Card>
-        </div>
 
-        {/* INFERENCE LOG */}
-        <Card title="📊 Inference Log (FOMO Detections)">
-          <div style={{ maxHeight: 160, overflow: "auto" }}>
-            {inferenceLog.length === 0 ? (
-              <div style={{ color: textSecondary, fontSize: 11, padding: "6px 0" }}>
-                Waiting for first inference…
-              </div>
-            ) : (
-              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
-                <thead>
-                  <tr style={{ color: textSecondary, textAlign: "left" }}>
-                    <th style={{ padding: "4px 8px", borderBottom: `1px solid ${border}` }}>Time</th>
-                    <th style={{ padding: "4px 8px", borderBottom: `1px solid ${border}` }}>Latency</th>
-                    {PRODUCTS.map((p) => (
-                      <th key={p.id} style={{ padding: "4px 8px", borderBottom: `1px solid ${border}` }}>
-                        {p.icon} {p.label}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {inferenceLog.map((log) => (
-                    <tr key={log.id} style={{ borderBottom: `1px solid ${border}15` }}>
-                      <td style={{ padding: "4px 8px", color: textSecondary }}>{log.time}</td>
-                      <td style={{ padding: "4px 8px", color: accent }}>{log.latency}ms</td>
-                      {log.detections.map((d, i) => (
-                        <td key={i} style={{ padding: "4px 8px" }}>
-                          <span style={{ fontWeight: 600 }}>{d.count}</span>
-                          <span style={{ color: textSecondary, marginLeft: 4, fontSize: 10 }}>
-                            ({d.confidence})
-                          </span>
-                        </td>
-                      ))}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
-          </div>
-        </Card>
+                  {/* Progress bar */}
+                  <div style={{ height: 6, borderRadius: 3, background: border, overflow: "hidden", marginBottom: isAlert ? 12 : 0 }}>
+                    <div style={{
+                      height: "100%",
+                      width: pct != null ? `${pct}%` : "0%",
+                      borderRadius: 3,
+                      background: statusColor,
+                      transition: "width 0.5s ease",
+                    }} />
+                  </div>
 
-        {/* ARCHITECTURE FOOTER */}
-        <div
-          style={{
-            background: surfaceAlt,
-            borderRadius: 10,
-            padding: "14px 20px",
-            border: `1px solid ${border}`,
-            display: "flex",
-            justifyContent: "space-between",
-            flexWrap: "wrap",
-            gap: 16,
-            fontSize: 11,
-            color: textSecondary,
-          }}
-        >
-          <div>
-            <span style={{ color: accent, fontWeight: 700 }}>EDGE</span> XIAO ESP32-S3 Sense · 8MB PSRAM · 240MHz
-          </div>
-          <div>
-            <span style={{ color: alertYellow, fontWeight: 700 }}>MODEL</span> FOMO · MobileNetV2 α=0.35 · 96×96 grayscale
-          </div>
-          <div>
-            <span style={{ color: green, fontWeight: 700 }}>SENSOR</span> AM312 PIR · 3.3V · 15µA standby
-          </div>
-          <div>
-            <span style={{ color: "#a78bfa", fontWeight: 700 }}>COMM</span> MQTT over WiFi · Event-driven
+                  {/* Inline alert message */}
+                  {isAlert && (
+                    <div style={{
+                      marginTop: 4,
+                      padding: "8px 12px",
+                      borderRadius: 6,
+                      background: alertColor + "18",
+                      border: `1px solid ${alertColor}40`,
+                      fontSize: 11,
+                      color: alertColor,
+                      fontWeight: 600,
+                    }}>
+                      {status === "empty"
+                        ? "⛔ No items detected — immediate restock required"
+                        : `⚠ Only ${count} item${count === 1 ? "" : "s"} left — restock soon`}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
           </div>
         </div>
+
+        </div>
+
       </div>
+
+      <style>{`@keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.2} }`}</style>
     </div>
   );
 }
 
-// --- Subcomponents ---
-
-function Card({ title, children, style = {} }) {
+function SectionLabel({ children }) {
   return (
-    <div
-      style={{
-        background: "#141922",
-        borderRadius: 10,
-        border: "1px solid #232D3F",
-        padding: "14px 18px",
-        ...style,
-      }}
-    >
-      <div
-        style={{
-          fontSize: 12,
-          fontWeight: 700,
-          color: "#7B8BA5",
-          textTransform: "uppercase",
-          letterSpacing: "0.06em",
-          marginBottom: 8,
-        }}
-      >
-        {title}
-      </div>
+    <div style={{ fontSize: 11, fontWeight: 700, color: "#7B8BA5", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 16 }}>
       {children}
     </div>
-  );
-}
-
-function MetricCard({ label, value, sub, color }) {
-  return (
-    <div
-      style={{
-        background: "#141922",
-        borderRadius: 10,
-        border: "1px solid #232D3F",
-        padding: "12px 16px",
-      }}
-    >
-      <div style={{ fontSize: 10, color: "#7B8BA5", textTransform: "uppercase", letterSpacing: "0.05em" }}>
-        {label}
-      </div>
-      <div style={{ fontSize: 22, fontWeight: 700, color, marginTop: 2 }}>{value}</div>
-      <div style={{ fontSize: 10, color: "#7B8BA5", marginTop: 1 }}>{sub}</div>
-    </div>
-  );
-}
-
-function StatusPill({ label, color, pulse }) {
-  return (
-    <div
-      style={{
-        display: "flex",
-        alignItems: "center",
-        gap: 6,
-        padding: "5px 12px",
-        borderRadius: 20,
-        background: color + "18",
-        border: `1px solid ${color}40`,
-        fontSize: 11,
-        fontWeight: 600,
-        color,
-      }}
-    >
-      <span
-        style={{
-          width: 7,
-          height: 7,
-          borderRadius: "50%",
-          background: color,
-          display: "inline-block",
-          animation: pulse ? "pulse 1.2s infinite" : "none",
-        }}
-      />
-      {label}
-      <style>{`@keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.3; } }`}</style>
-    </div>
-  );
-}
-
-function MiniBtn({ children, onClick }) {
-  return (
-    <button
-      onClick={onClick}
-      style={{
-        width: 28,
-        height: 28,
-        borderRadius: 6,
-        border: "1px solid #232D3F",
-        background: "#1A2030",
-        color: "#E2E8F0",
-        cursor: "pointer",
-        fontSize: 15,
-        fontWeight: 700,
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        fontFamily: "inherit",
-      }}
-    >
-      {children}
-    </button>
   );
 }
 
 function btnStyle(color) {
   return {
-    padding: "6px 14px",
-    borderRadius: 6,
-    border: `1px solid ${color}60`,
-    background: color + "18",
-    color,
-    cursor: "pointer",
-    fontSize: 12,
-    fontWeight: 600,
-    fontFamily: "inherit",
-    letterSpacing: "0.02em",
+    padding: "6px 14px", borderRadius: 6, border: `1px solid ${color}60`,
+    background: color + "18", color, cursor: "pointer", fontSize: 12,
+    fontWeight: 600, fontFamily: "inherit", letterSpacing: "0.02em",
   };
 }
