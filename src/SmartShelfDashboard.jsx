@@ -454,14 +454,11 @@ export default function SmartShelfDashboard() {
                 )}
               </div>
               {/* Controls */}
-              <div style={{ padding: "10px 14px", borderTop: `1px solid ${border}`, display: "flex", gap: 8 }}>
+              <div style={{ padding: "10px 14px", borderTop: `1px solid ${border}`, display: "flex", justifyContent: "center" }}>
                 {camState !== "active"
                   ? <button onClick={startCamera} style={btnStyle(accent, font)}>{camSource === "xiao" ? "🔌 Connect" : "▶ Start Camera"}</button>
                   : <button onClick={stopCamera}  style={btnStyle(alertRed, font)}>■ Stop</button>
                 }
-                <span style={{ fontSize: 11, color: textSecondary, alignSelf: "center" }}>
-                  {camState === "active" ? `Inference every 2 s · ${totalRuns} run${totalRuns !== 1 ? "s" : ""}` : camSource === "xiao" ? "Requires XIAO on the same network" : "Open in phone browser for rear camera"}
-                </span>
               </div>
             </div>
 
