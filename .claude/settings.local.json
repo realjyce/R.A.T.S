@@ -3,7 +3,8 @@
     "allow": [
       "Read(//c/Users/post9/OneDrive/Desktop/intelligent edge system/**)",
       "Bash(python -c ' *)",
-      "Bash(pip install *)"
+      "Bash(pip install *)",
+      "Bash(python -c \"from ultralytics import YOLO; m=YOLO\\('C:/Users/post9/OneDrive/Documents/GitHub/R.A.T.S/model/best.pt'\\); print\\('Classes:', m.names\\)\")"
     ]
   }
 }

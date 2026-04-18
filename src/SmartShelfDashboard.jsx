@@ -8,14 +8,11 @@ const HARDWARE = [
 ];
 
 const PRODUCTS = [
-  { id: "bottle", label: "Bottle", icon: "🍶", color: "#38BDF8", max: 6 },
-  { id: "can",    label: "Can",    icon: "🥫", color: "#F97316", max: 8 },
-  { id: "chips",  label: "Chips",  icon: "🥨", color: "#22C55E", max: 5 },
+  { id: "bottle", label: "Bottle", icon: "🍶", color: "#38BDF8" },
+  { id: "snack",  label: "Snack",  icon: "🍿", color: "#F97316" },
+  { id: "cup",    label: "Cup",    icon: "🍜", color: "#22C55E" },
 ];
 
-function randomBetween(a, b) {
-  return Math.floor(Math.random() * (b - a + 1)) + a;
-}
 function formatTime(d) {
   return d.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
@@ -36,205 +33,173 @@ const THEMES = {
 };
 
 // ─────────────────────────────────────────────
+//  Mini SVG line chart
+// ─────────────────────────────────────────────
+function LineChart({ series, width = 400, height = 90, colors }) {
+  if (!series.length || !series[0].data.length) return null;
+  const n    = series[0].data.length;
+  const allV = series.flatMap((s) => s.data);
+  const minV = Math.min(...allV), maxV = Math.max(...allV);
+  const range = maxV - minV || 1;
+  const pts = (data) =>
+    data.map((v, i) => {
+      const x = (i / (n - 1)) * width;
+      const y = height - ((v - minV) / range) * (height - 8) - 4;
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    }).join(" ");
+  return (
+    <svg width="100%" viewBox={`0 0 ${width} ${height}`} style={{ display: "block" }}>
+      {series.map((s, i) => (
+        <polyline key={i} points={pts(s.data)} fill="none" stroke={colors[i]} strokeWidth="1.8"
+          strokeLinejoin="round" strokeLinecap="round" />
+      ))}
+    </svg>
+  );
+}
+
+// ─────────────────────────────────────────────
 //  AI EVALUATION PAGE
 // ─────────────────────────────────────────────
-function AiEvaluationPage({ t, font, inferLog, totalRuns, avgLatency }) {
-  const { bg, surface, surfaceAlt, border, textPrimary, textSecondary, accent, green, alertRed } = t;
+function AiEvaluationPage({ t, inferLog, totalRuns, avgLatency }) {
+  const { bg, surfaceAlt, border, textSecondary, accent, green } = t;
 
-  // Static model metrics per class (from Edge Impulse training output)
-  const classMetrics = [
-    { label: "Bottle", icon: "🍶", color: "#38BDF8", precision: 0.91, recall: 0.88, f1: 0.89, samples: 120 },
-    { label: "Can",    icon: "🥫", color: "#F97316", precision: 0.87, recall: 0.85, f1: 0.86, samples: 150 },
-    { label: "Chips",  icon: "🥨", color: "#22C55E", precision: 0.93, recall: 0.90, f1: 0.91, samples: 100 },
-  ];
+  const [metrics, setMetrics] = useState(null);
 
-  const overallAcc = 0.893;
+  useEffect(() => {
+    fetch("/metrics")
+      .then((r) => r.json())
+      .then((d) => setMetrics(d))
+      .catch(() => {});
+  }, []);
 
-  // Confusion matrix (rows = actual, cols = predicted) [bottle, can, chips]
-  const confMatrix = [
-    [106,  8,  6],
-    [  9, 128, 13],
-    [  5,  5,  90],
-  ];
-  const confLabels = ["Bottle", "Can", "Chips"];
-  const confMax    = Math.max(...confMatrix.flat());
-
-  // Per-class confidence history from live log
-  const confHistory = PRODUCTS.map((p) => {
-    const vals = inferLog.flatMap((entry) =>
-      entry.detections ? entry.detections.filter((d) => d.id === p.id).map((d) => parseFloat(d.conf)) : []
+  // Live per-class confidence from webcam inference log
+  const liveConf = PRODUCTS.map((p) => {
+    const vals = inferLog.flatMap((e) =>
+      (e.detections || []).filter((d) => d.label === p.id).map((d) => d.conf)
     );
-    const avg = vals.length ? (vals.reduce((a, b) => a + b, 0) / vals.length).toFixed(2) : null;
-    return { ...p, avgConf: avg, samples: vals.length };
+    const avg = vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
+    return { ...p, avgConf: avg, count: vals.length };
   });
+
+  const c = metrics?.curves ?? {};
 
   return (
     <div style={{ padding: "24px 28px", display: "flex", flexDirection: "column", gap: 28 }}>
 
-      {/* MODEL OVERVIEW */}
-      <div>
-        <SectionLabel color={textSecondary}>Model Overview</SectionLabel>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 14 }}>
-          {[
-            { label: "Model",       value: "FOMO",             sub: "Faster Objects, More Objects", color: accent },
-            { label: "Backbone",    value: "MobileNetV2",      sub: "α = 0.35",                    color: "#A78BFA" },
-            { label: "Input Size",  value: "96 × 96",          sub: "Grayscale",                   color: "#F97316" },
-            { label: "Overall Acc", value: `${(overallAcc * 100).toFixed(1)}%`, sub: "Validation set", color: green },
-          ].map((m) => (
-            <div key={m.label} style={{ background: surfaceAlt, border: `1px solid ${border}`, borderTop: `3px solid ${m.color}`, borderRadius: 10, padding: "14px 18px" }}>
-              <div style={{ fontSize: 10, color: textSecondary, textTransform: "uppercase", letterSpacing: "0.05em" }}>{m.label}</div>
-              <div style={{ fontSize: 22, fontWeight: 800, color: m.color, marginTop: 4 }}>{m.value}</div>
-              <div style={{ fontSize: 10, color: textSecondary, marginTop: 2 }}>{m.sub}</div>
-            </div>
-          ))}
-        </div>
-      </div>
-
-      {/* PER-CLASS METRICS */}
-      <div>
-        <SectionLabel color={textSecondary}>Per-Class Performance</SectionLabel>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 14 }}>
-          {classMetrics.map((c) => (
-            <div key={c.label} style={{ background: surfaceAlt, border: `1px solid ${border}`, borderTop: `3px solid ${c.color}`, borderRadius: 10, padding: "16px 20px" }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14 }}>
-                <span style={{ fontSize: 22 }}>{c.icon}</span>
-                <div>
-                  <div style={{ fontWeight: 700, fontSize: 14, color: textPrimary }}>{c.label}</div>
-                  <div style={{ fontSize: 10, color: textSecondary }}>{c.samples} training samples</div>
-                </div>
-              </div>
-              {[
-                { label: "Precision", value: c.precision },
-                { label: "Recall",    value: c.recall },
-                { label: "F1 Score",  value: c.f1 },
-              ].map((m) => (
-                <div key={m.label} style={{ marginBottom: 10 }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, marginBottom: 4 }}>
-                    <span style={{ color: textSecondary }}>{m.label}</span>
-                    <span style={{ fontWeight: 700, color: textPrimary }}>{(m.value * 100).toFixed(1)}%</span>
-                  </div>
-                  <div style={{ height: 5, borderRadius: 3, background: border, overflow: "hidden" }}>
-                    <div style={{ height: "100%", width: `${m.value * 100}%`, borderRadius: 3, background: c.color, transition: "width 0.6s ease" }} />
-                  </div>
-                </div>
-              ))}
-            </div>
-          ))}
-        </div>
-      </div>
-
-      {/* CONFUSION MATRIX + LIVE CONFIDENCE */}
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
-
-        {/* Confusion Matrix */}
-        <div style={{ background: surfaceAlt, border: `1px solid ${border}`, borderRadius: 10, padding: "16px 20px" }}>
-          <SectionLabel color={textSecondary}>Confusion Matrix</SectionLabel>
-          <div style={{ fontSize: 10, color: textSecondary, marginBottom: 12 }}>Rows = Actual · Cols = Predicted</div>
-          <table style={{ borderCollapse: "collapse", width: "100%" }}>
-            <thead>
-              <tr>
-                <th style={{ padding: "6px 8px", fontSize: 10, color: textSecondary, textAlign: "left" }}></th>
-                {confLabels.map((l) => (
-                  <th key={l} style={{ padding: "6px 8px", fontSize: 10, color: accent, textAlign: "center", fontWeight: 700 }}>{l}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {confMatrix.map((row, ri) => (
-                <tr key={ri}>
-                  <td style={{ padding: "6px 8px", fontSize: 10, color: accent, fontWeight: 700 }}>{confLabels[ri]}</td>
-                  {row.map((val, ci) => {
-                    const isDiag   = ri === ci;
-                    const opacity  = 0.15 + (val / confMax) * 0.75;
-                    const cellBg   = isDiag
-                      ? `rgba(34,197,94,${opacity})`
-                      : val > 0 ? `rgba(239,68,68,${opacity * 0.6})` : "transparent";
-                    return (
-                      <td key={ci} style={{
-                        padding: "8px", textAlign: "center", fontSize: 13, fontWeight: 700,
-                        borderRadius: 6, background: cellBg,
-                        color: isDiag ? green : val > 0 ? alertRed : textSecondary,
-                        border: `1px solid ${border}`,
-                      }}>
-                        {val}
-                      </td>
-                    );
-                  })}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-
-        {/* Live session stats */}
-        <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-
-          {/* Session summary */}
+      {/* TRAINING CURVES */}
+      {c.epochs?.length > 0 && (
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
           <div style={{ background: surfaceAlt, border: `1px solid ${border}`, borderRadius: 10, padding: "16px 20px" }}>
-            <SectionLabel color={textSecondary}>Live Session</SectionLabel>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-              {[
-                { label: "Total Runs",  value: totalRuns,                           color: accent },
-                { label: "Avg Latency", value: avgLatency ? `${avgLatency}ms` : "—", color: green },
-              ].map((m) => (
-                <div key={m.label} style={{ background: t.bg, border: `1px solid ${border}`, borderRadius: 8, padding: "10px 12px" }}>
-                  <div style={{ fontSize: 10, color: textSecondary, textTransform: "uppercase", letterSpacing: "0.05em" }}>{m.label}</div>
-                  <div style={{ fontSize: 22, fontWeight: 800, color: m.color, marginTop: 2 }}>{m.value}</div>
-                </div>
-              ))}
+            <SectionLabel color={textSecondary}>Loss Curves</SectionLabel>
+            <div style={{ display: "flex", gap: 16, fontSize: 10, color: textSecondary, marginBottom: 10 }}>
+              <span style={{ color: accent }}>— Train box</span>
+              <span style={{ color: "#A78BFA" }}>— Val box</span>
+              <span style={{ color: "#F97316" }}>— Train cls</span>
+              <span style={{ color: green }}>— Val cls</span>
+            </div>
+            <LineChart series={[{ data: c.train_box_loss }, { data: c.val_box_loss }, { data: c.train_cls_loss }, { data: c.val_cls_loss }]} colors={[accent, "#A78BFA", "#F97316", green]} />
+            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: textSecondary, marginTop: 6 }}>
+              <span>Epoch 1</span><span>Epoch {metrics?.epoch_trained}</span>
             </div>
           </div>
+          <div style={{ background: surfaceAlt, border: `1px solid ${border}`, borderRadius: 10, padding: "16px 20px" }}>
+            <SectionLabel color={textSecondary}>Performance Curves</SectionLabel>
+            <div style={{ display: "flex", gap: 16, fontSize: 10, color: textSecondary, marginBottom: 10 }}>
+              <span style={{ color: accent }}>— Precision</span>
+              <span style={{ color: green }}>— Recall</span>
+              <span style={{ color: "#F97316" }}>— mAP@50</span>
+              <span style={{ color: "#A78BFA" }}>— mAP@50-95</span>
+            </div>
+            <LineChart series={[{ data: c.precision }, { data: c.recall }, { data: c.mAP50 }, { data: c.mAP50_95 }]} colors={[accent, green, "#F97316", "#A78BFA"]} />
+            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: textSecondary, marginTop: 6 }}>
+              <span>Epoch 1</span><span>Epoch {metrics?.epoch_trained}</span>
+            </div>
+          </div>
+        </div>
+      )}
 
-          {/* Live avg confidence per class */}
-          <div style={{ background: surfaceAlt, border: `1px solid ${border}`, borderRadius: 10, padding: "16px 20px", flex: 1 }}>
-            <SectionLabel color={textSecondary}>Live Avg Confidence</SectionLabel>
-            {confHistory.map((c) => (
-              <div key={c.id} style={{ marginBottom: 12 }}>
-                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, marginBottom: 4 }}>
-                  <span style={{ color: textSecondary }}>{c.icon} {c.label}</span>
-                  <span style={{ fontWeight: 700, color: c.avgConf ? c.color : textSecondary }}>
-                    {c.avgConf ? `${(c.avgConf * 100).toFixed(1)}%` : "—"}
-                    {c.samples > 0 && <span style={{ color: textSecondary, fontWeight: 400, marginLeft: 6 }}>({c.samples})</span>}
-                  </span>
-                </div>
-                <div style={{ height: 5, borderRadius: 3, background: border, overflow: "hidden" }}>
-                  <div style={{ height: "100%", width: c.avgConf ? `${c.avgConf * 100}%` : "0%", borderRadius: 3, background: c.color, transition: "width 0.5s ease" }} />
-                </div>
+      {/* LIVE SESSION + CONFIDENCE */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 2fr", gap: 14 }}>
+        <div style={{ background: surfaceAlt, border: `1px solid ${border}`, borderRadius: 10, padding: "16px 20px" }}>
+          <SectionLabel color={textSecondary}>Live Session</SectionLabel>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 10 }}>
+            {[
+              { label: "Total Runs",  value: totalRuns,                            color: accent },
+              { label: "Avg Latency", value: avgLatency ? `${avgLatency}ms` : "—", color: green },
+            ].map((m) => (
+              <div key={m.label} style={{ background: bg, border: `1px solid ${border}`, borderRadius: 8, padding: "10px 12px" }}>
+                <div style={{ fontSize: 10, color: textSecondary, textTransform: "uppercase", letterSpacing: "0.05em" }}>{m.label}</div>
+                <div style={{ fontSize: 22, fontWeight: 800, color: m.color, marginTop: 2 }}>{m.value}</div>
               </div>
             ))}
-            {totalRuns === 0 && (
-              <div style={{ fontSize: 11, color: textSecondary, marginTop: 4 }}>Run the camera on the Dashboard to populate live data.</div>
-            )}
           </div>
+          {totalRuns === 0 && <div style={{ fontSize: 11, color: textSecondary }}>Start the webcam on the Dashboard to populate live data.</div>}
+        </div>
+
+        <div style={{ background: surfaceAlt, border: `1px solid ${border}`, borderRadius: 10, padding: "16px 20px" }}>
+          <SectionLabel color={textSecondary}>Live Detection Confidence</SectionLabel>
+          {liveConf.map((p) => (
+            <div key={p.id} style={{ marginBottom: 14 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, marginBottom: 5 }}>
+                <span style={{ color: textSecondary }}>{p.icon} {p.label}</span>
+                <span style={{ fontWeight: 700, color: p.avgConf != null ? p.color : textSecondary }}>
+                  {p.avgConf != null ? `${(p.avgConf * 100).toFixed(1)}%` : "—"}
+                  {p.count > 0 && <span style={{ color: textSecondary, fontWeight: 400, marginLeft: 6 }}>({p.count} detections)</span>}
+                </span>
+              </div>
+              <div style={{ height: 6, borderRadius: 3, background: border, overflow: "hidden" }}>
+                <div style={{ height: "100%", width: p.avgConf != null ? `${(p.avgConf * 100).toFixed(1)}%` : "0%", borderRadius: 3, background: p.color, transition: "width 0.5s ease" }} />
+              </div>
+            </div>
+          ))}
         </div>
       </div>
 
-      {/* INFERENCE LOG TABLE */}
-      <div style={{ background: surfaceAlt, border: `1px solid ${border}`, borderRadius: 10, padding: "16px 20px" }}>
-        <SectionLabel color={textSecondary}>Inference Log</SectionLabel>
+      {/* INFERENCE LOG */}
+      <div style={{ background: surfaceAlt, border: `1px solid ${border}`, borderRadius: 10, overflow: "hidden" }}>
+        {/* Header row */}
+        <div style={{ padding: "14px 20px 10px", borderBottom: `1px solid ${border}`, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <div style={{ fontSize: 11, fontWeight: 700, color: textSecondary, textTransform: "uppercase", letterSpacing: "0.08em" }}>Inference Log</div>
+          {inferLog.length > 0 && (
+            <span style={{ fontSize: 10, color: textSecondary }}>{inferLog.length} entr{inferLog.length === 1 ? "y" : "ies"}</span>
+          )}
+        </div>
+
         {inferLog.length === 0 ? (
-          <div style={{ fontSize: 11, color: textSecondary }}>No inferences yet — start the camera on the Dashboard page.</div>
+          <div style={{ padding: "14px 20px", fontSize: 11, color: textSecondary }}>
+            No inferences yet — start the webcam on the Dashboard page.
+          </div>
         ) : (
-          <div style={{ overflowX: "auto" }}>
-            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
+          /* Scrollable table — sticky thead stays, tbody scrolls */
+          <div style={{ height: 280, overflowY: "auto", overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11, tableLayout: "fixed", minWidth: 480 }}>
+              <colgroup>
+                <col style={{ width: 42 }} />
+                <col style={{ width: 100 }} />
+                <col style={{ width: 80 }} />
+                {PRODUCTS.map((p) => <col key={p.id} />)}
+              </colgroup>
               <thead>
-                <tr style={{ color: textSecondary, textAlign: "left" }}>
-                  <th style={{ padding: "6px 10px", borderBottom: `1px solid ${border}` }}>#</th>
-                  <th style={{ padding: "6px 10px", borderBottom: `1px solid ${border}` }}>Time</th>
-                  <th style={{ padding: "6px 10px", borderBottom: `1px solid ${border}` }}>Latency</th>
+                <tr style={{ color: textSecondary, textAlign: "left", background: surfaceAlt, position: "sticky", top: 0, zIndex: 2 }}>
+                  <th style={{ padding: "8px 10px", borderBottom: `1px solid ${border}`, fontWeight: 600 }}>#</th>
+                  <th style={{ padding: "8px 10px", borderBottom: `1px solid ${border}`, fontWeight: 600 }}>Time</th>
+                  <th style={{ padding: "8px 10px", borderBottom: `1px solid ${border}`, fontWeight: 600 }}>Latency</th>
                   {PRODUCTS.map((p) => (
-                    <th key={p.id} style={{ padding: "6px 10px", borderBottom: `1px solid ${border}` }}>{p.icon} {p.label}</th>
+                    <th key={p.id} style={{ padding: "8px 10px", borderBottom: `1px solid ${border}`, fontWeight: 600 }}>{p.icon} {p.label}</th>
                   ))}
                 </tr>
               </thead>
               <tbody>
                 {inferLog.map((entry, i) => (
-                  <tr key={entry.id} style={{ borderBottom: `1px solid ${border}20` }}>
-                    <td style={{ padding: "5px 10px", color: textSecondary }}>{inferLog.length - i}</td>
-                    <td style={{ padding: "5px 10px", color: textSecondary }}>{entry.time}</td>
-                    <td style={{ padding: "5px 10px", color: accent, fontWeight: 700 }}>{entry.latency}ms</td>
+                  <tr key={entry.id} style={{ borderBottom: `1px solid ${border}30`, transition: "background 0.15s" }}
+                    onMouseEnter={(e) => e.currentTarget.style.background = border + "30"}
+                    onMouseLeave={(e) => e.currentTarget.style.background = "transparent"}
+                  >
+                    <td style={{ padding: "6px 10px", color: textSecondary }}>{inferLog.length - i}</td>
+                    <td style={{ padding: "6px 10px", color: textSecondary }}>{entry.time}</td>
+                    <td style={{ padding: "6px 10px", color: accent, fontWeight: 700 }}>{entry.latency}ms</td>
                     {PRODUCTS.map((p) => (
-                      <td key={p.id} style={{ padding: "5px 10px", fontWeight: 600, color: p.color }}>{entry.counts[p.id]}</td>
+                      <td key={p.id} style={{ padding: "6px 10px", fontWeight: 600, color: p.color }}>{entry.counts?.[p.id] ?? 0}</td>
                     ))}
                   </tr>
                 ))}
@@ -243,7 +208,6 @@ function AiEvaluationPage({ t, font, inferLog, totalRuns, avgLatency }) {
           </div>
         )}
       </div>
-
     </div>
   );
 }
@@ -255,103 +219,122 @@ export default function SmartShelfDashboard() {
   const font = `'JetBrains Mono', 'Fira Code', 'SF Mono', 'Consolas', monospace`;
 
   const [dark, setDark] = useState(true);
-  const [page, setPage] = useState("dashboard"); // "dashboard" | "evaluation"
+  const [page, setPage] = useState("dashboard");
   const t = dark ? THEMES.dark : THEMES.light;
   const { bg, surface, surfaceAlt, border, textPrimary, textSecondary, accent, alertRed, green } = t;
 
-  const [camSource, setCamSource] = useState("mockup");
-  const [xiaoUrl,   setXiaoUrl]   = useState("http://192.168.4.1/stream");
+  const [camSource, setCamSource] = useState("xiao"); // "xiao" | "webcam"
+  const [xiaoUrl,   setXiaoUrl]  = useState("http://192.168.4.1/stream");
+  const [camState,  setCamState] = useState("idle"); // idle | requesting | active | error
+  const [camError,  setCamError] = useState("");
+  const [inferLog, setInferLog] = useState([]);
+  const [totalRuns, setTotalRuns] = useState(0);
+  const [avgLatency, setAvgLatency] = useState(null);
+  const [stocks,    setStocks]   = useState(null);
 
-  const videoRef  = useRef(null);
-  const canvasRef = useRef(null);
+  const videoRef    = useRef(null);
+  const canvasRef   = useRef(null);   // detection overlay (webcam mode)
+  const captureRef  = useRef(null);   // hidden canvas for frame capture
+  const inferRef    = useRef(null);
+  const latencies   = useRef([]);
+
   const streamRef = useRef(null);
-  const inferRef  = useRef(null);
 
-  const [camState,       setCamState]       = useState("idle");
-  const [camError,       setCamError]       = useState("");
-  const [inferLog,       setInferLog]       = useState([]);
-  const [lastDetections, setLastDetections] = useState([]);
-  const [totalRuns,      setTotalRuns]      = useState(0);
-  const [avgLatency,     setAvgLatency]     = useState(null);
-  const [stocks,         setStocks]         = useState(null);
-  const latencies = useRef([]);
-
-  const drawDetections = useCallback((detections, w, h) => {
+  // ── Draw YOLO boxes on overlay canvas ─────────────────────────
+  const drawBoxes = useCallback((detections, vw, vh) => {
     const canvas = canvasRef.current;
     if (!canvas) return;
+    canvas.width = vw; canvas.height = vh;
     const ctx = canvas.getContext("2d");
-    canvas.width = w; canvas.height = h;
-    ctx.clearRect(0, 0, w, h);
-    detections.forEach(({ x, y, label, color, conf }) => {
-      const bx = x - 18, by = y - 18;
+    ctx.clearRect(0, 0, vw, vh);
+    const COLORS = { bottle: "#38BDF8", snack: "#F97316", cup: "#22C55E" };
+    detections.forEach(({ x1, y1, x2, y2, label, conf }) => {
+      const color = COLORS[label] ?? "#FFFFFF";
       ctx.strokeStyle = color; ctx.lineWidth = 2;
-      ctx.strokeRect(bx, by, 36, 36);
+      ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
       ctx.fillStyle = color;
-      ctx.beginPath(); ctx.arc(x, y, 3, 0, Math.PI * 2); ctx.fill();
-      ctx.font = "bold 10px monospace";
-      ctx.fillText(`${label} ${conf}`, bx, by - 4);
+      ctx.beginPath(); ctx.arc((x1+x2)/2, (y1+y2)/2, 4, 0, Math.PI*2); ctx.fill();
+      const txt = `${label} ${(conf*100).toFixed(0)}%`;
+      ctx.font = "bold 11px monospace";
+      const tw = ctx.measureText(txt).width;
+      ctx.fillStyle = color + "CC"; ctx.fillRect(x1, y1 - 18, tw + 10, 18);
+      ctx.fillStyle = "#000"; ctx.fillText(txt, x1 + 5, y1 - 4);
     });
   }, []);
 
-  const runInference = useCallback(() => {
-    const video = videoRef.current, canvas = canvasRef.current;
-    if (!video || !canvas || video.readyState < 2) return;
-    const t0 = performance.now();
-    const w = video.videoWidth || 320, h = video.videoHeight || 240;
-    const count = randomBetween(1, 5);
-    const detections = Array.from({ length: count }, () => {
-      const p = PRODUCTS[randomBetween(0, PRODUCTS.length - 1)];
-      return { x: randomBetween(30, w - 30), y: randomBetween(30, h - 30), label: p.label, color: p.color, conf: (0.80 + Math.random() * 0.18).toFixed(2), id: p.id };
-    });
-    drawDetections(detections, w, h);
-    const latency = randomBetween(120, 210) + Math.round(performance.now() - t0);
-    latencies.current = [...latencies.current.slice(-29), latency];
-    const avg = Math.round(latencies.current.reduce((a, b) => a + b, 0) / latencies.current.length);
-    const counts = {};
-    PRODUCTS.forEach((p) => { counts[p.id] = 0; });
-    detections.forEach((d) => { counts[d.id] = (counts[d.id] || 0) + 1; });
-    const now = new Date();
-    setLastDetections(detections);
-    setInferLog((prev) => [{ time: formatTime(now), latency, counts, detections, id: Date.now() }, ...prev.slice(0, 49)]);
-    setTotalRuns((n) => n + 1);
-    setAvgLatency(avg);
-    setStocks(counts);
-  }, [drawDetections]);
+  // ── Webcam: capture frame → /detect → draw boxes ──────────────
+  const runDetection = useCallback(async () => {
+    const video   = videoRef.current;
+    const capture = captureRef.current;
+    if (!video || !capture || video.readyState < 2) return;
+    const vw = video.videoWidth || 640, vh = video.videoHeight || 480;
+    capture.width = vw; capture.height = vh;
+    capture.getContext("2d").drawImage(video, 0, 0, vw, vh);
+    const dataUrl = capture.toDataURL("image/jpeg", 0.8);
+    try {
+      const res  = await fetch("/detect", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ image: dataUrl }) });
+      const data = await res.json();
+      if (!data.detections) return;
+      drawBoxes(data.detections, vw, vh);
+      const latency = data.latency ?? 0;
+      latencies.current = [...latencies.current.slice(-29), latency];
+      const avg = Math.round(latencies.current.reduce((a, b) => a + b, 0) / latencies.current.length);
+      setStocks(data.counts);
+      setTotalRuns((n) => n + 1);
+      setAvgLatency(avg);
+      setInferLog((prev) => [{ time: formatTime(new Date()), latency, counts: data.counts, detections: data.detections, id: Date.now() }, ...prev.slice(0, 49)]);
+    } catch { /* backend not reachable */ }
+  }, [drawBoxes]);
+
+  // ── XIAO: poll /status for stock counts ───────────────────────
+  const pollStocks = useCallback(async () => {
+    try {
+      const base = xiaoUrl.replace("/stream", "");
+      const res  = await fetch(`${base}/status`, { signal: AbortSignal.timeout(2000) });
+      const data = await res.json();
+      if (data.counts) {
+        setStocks(data.counts);
+        const latency = data.latency ?? 0;
+        latencies.current = [...latencies.current.slice(-29), latency];
+        const avg = Math.round(latencies.current.reduce((a, b) => a + b, 0) / latencies.current.length);
+        setTotalRuns((n) => n + 1);
+        setAvgLatency(avg);
+        setInferLog((prev) => [{ time: formatTime(new Date()), latency, counts: data.counts, id: Date.now() }, ...prev.slice(0, 49)]);
+      }
+    } catch { /* silently skip */ }
+  }, [xiaoUrl]);
 
   const startCamera = useCallback(async () => {
     setCamState("requesting"); setCamError("");
     try {
-      if (camSource === "mockup") {
+      if (camSource === "webcam") {
         const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } } });
         streamRef.current = stream;
         if (videoRef.current) { videoRef.current.srcObject = stream; videoRef.current.src = ""; await videoRef.current.play(); }
+        inferRef.current = setInterval(runDetection, 2000);
       } else {
         if (videoRef.current) { videoRef.current.srcObject = null; videoRef.current.src = xiaoUrl; await videoRef.current.play(); }
+        inferRef.current = setInterval(pollStocks, 2000);
       }
       setCamState("active");
-      inferRef.current = setInterval(runInference, 2000);
     } catch (err) { setCamState("error"); setCamError(err.message || "Could not connect"); }
-  }, [camSource, xiaoUrl, runInference]);
+  }, [camSource, xiaoUrl, runDetection, pollStocks]);
 
   const stopCamera = useCallback(() => {
     clearInterval(inferRef.current);
-    streamRef.current?.getTracks().forEach((t) => t.stop());
+    streamRef.current?.getTracks().forEach((tr) => tr.stop());
+    streamRef.current = null;
     if (videoRef.current) { videoRef.current.srcObject = null; videoRef.current.src = ""; }
     if (canvasRef.current) { const ctx = canvasRef.current.getContext("2d"); ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height); }
-    setCamState("idle"); setLastDetections([]); setStocks(null);
+    setCamState("idle"); setStocks(null);
   }, []);
 
   useEffect(() => { stopCamera(); }, [camSource]); // eslint-disable-line
-  useEffect(() => () => { clearInterval(inferRef.current); streamRef.current?.getTracks().forEach((t) => t.stop()); }, []);
-
-  const sourceLabel = camSource === "xiao" ? "XIAO ESP32-S3 (MJPEG)" : "Mockup Cam — Phone / Webcam";
-  const idleHint    = camSource === "xiao"
-    ? <><strong style={{ color: accent }}>Connect</strong> after entering the device IP</>
-    : <>Press <strong style={{ color: accent }}>Start Camera</strong> to begin mock feed</>;
+  useEffect(() => () => clearInterval(inferRef.current), []);
 
   const NAV = [
     { id: "dashboard",  label: "📊 Dashboard" },
-    { id: "evaluation", label: "🧪 AI Evaluation" },
+    { id: "evaluation", label: "📋 History" },
   ];
 
   return (
@@ -359,38 +342,21 @@ export default function SmartShelfDashboard() {
 
       {/* HEADER */}
       <div style={{ background: `linear-gradient(90deg, ${surface} 0%, ${dark ? "#0F1923" : "#E2EBF3"} 100%)`, borderBottom: `1px solid ${border}` }}>
-
-        {/* Project title row */}
         <div style={{ padding: "14px 28px", borderBottom: `1px solid ${border}`, textAlign: "center" }}>
           <div style={{ fontWeight: 700, fontSize: 17, letterSpacing: "0.04em", color: textPrimary }}>
             R.A.T.S &mdash; Real-Time Auto Tracking Shelf
           </div>
         </div>
-
-        {/* Nav bar row */}
-        <nav style={{ display: "flex", justifyContent: "center", gap: 0 }}>
+        <nav style={{ display: "flex", justifyContent: "center" }}>
           {NAV.map((n) => {
             const active = page === n.id;
             return (
-              <button
-                key={n.id}
-                onClick={() => setPage(n.id)}
-                style={{
-                  padding: "0 18px", height: 42, border: "none",
-                  borderBottom: active ? `2px solid ${accent}` : "2px solid transparent",
-                  background: "transparent",
-                  color: active ? accent : textSecondary,
-                  fontFamily: font, fontSize: 12, fontWeight: active ? 700 : 400,
-                  cursor: "pointer", letterSpacing: "0.03em",
-                  transition: "all 0.15s",
-                }}
-              >
+              <button key={n.id} onClick={() => setPage(n.id)} style={{ padding: "0 18px", height: 42, border: "none", borderBottom: active ? `2px solid ${accent}` : "2px solid transparent", background: "transparent", color: active ? accent : textSecondary, fontFamily: font, fontSize: 12, fontWeight: active ? 700 : 400, cursor: "pointer", letterSpacing: "0.03em", transition: "all 0.15s" }}>
                 {n.label}
               </button>
             );
           })}
         </nav>
-
       </div>
 
       {/* PAGE: DASHBOARD */}
@@ -418,45 +384,74 @@ export default function SmartShelfDashboard() {
           {/* CAMERA PANEL */}
           <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
             <div style={{ background: surfaceAlt, border: `1px solid ${border}`, borderRadius: 10, overflow: "hidden" }}>
-              {/* Top bar */}
-              <div style={{ padding: "8px 14px", borderBottom: `1px solid ${border}`, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
-                <div style={{ display: "flex", gap: 0, background: bg, border: `1px solid ${border}`, borderRadius: 6, overflow: "hidden" }}>
-                  {["xiao", "mockup"].map((src) => {
-                    const active = camSource === src;
+
+              {/* Top bar: source toggle + URL + status */}
+              <div style={{ padding: "8px 14px", borderBottom: `1px solid ${border}`, display: "flex", alignItems: "center", gap: 12 }}>
+
+                {/* Source toggle */}
+                <div style={{ display: "flex", background: bg, border: `1px solid ${border}`, borderRadius: 6, overflow: "hidden", flexShrink: 0 }}>
+                  {[
+                    { id: "xiao",   label: "🔌 XIAO ESP32-S3" },
+                    { id: "webcam", label: "📷 Webcam" },
+                  ].map((src, i) => {
+                    const active = camSource === src.id;
                     return (
-                      <button key={src} onClick={() => setCamSource(src)} style={{ padding: "5px 16px", border: "none", borderRight: src === "xiao" ? `1px solid ${border}` : "none", background: active ? accent + "22" : "transparent", color: active ? accent : textSecondary, fontFamily: font, fontSize: 11, fontWeight: active ? 700 : 400, cursor: "pointer", letterSpacing: "0.03em", transition: "all 0.15s" }}>
-                        {src === "xiao" ? "🔌 XIAO ESP32-S3" : "💻 Mockup Cam"}
+                      <button key={src.id} onClick={() => setCamSource(src.id)} style={{ padding: "5px 14px", border: "none", borderRight: i === 0 ? `1px solid ${border}` : "none", background: active ? accent + "22" : "transparent", color: active ? accent : textSecondary, fontFamily: font, fontSize: 11, fontWeight: active ? 700 : 400, cursor: "pointer", transition: "all 0.15s" }}>
+                        {src.label}
                       </button>
                     );
                   })}
                 </div>
+
+                {/* URL input — XIAO only */}
                 {camSource === "xiao" && (
-                  <input value={xiaoUrl} onChange={(e) => setXiaoUrl(e.target.value)} placeholder="http://192.168.4.1/stream" style={{ background: bg, border: `1px solid ${border}`, borderRadius: 6, color: textPrimary, fontFamily: font, fontSize: 11, padding: "4px 10px", width: 240, outline: "none", flex: 1 }} />
+                  <input
+                    value={xiaoUrl}
+                    onChange={(e) => setXiaoUrl(e.target.value)}
+                    placeholder="http://192.168.4.1/stream"
+                    style={{ background: bg, border: `1px solid ${border}`, borderRadius: 6, color: textPrimary, fontFamily: font, fontSize: 11, padding: "4px 10px", flex: 1, outline: "none" }}
+                  />
                 )}
+
+                {/* Live status */}
                 <span style={{ display: "flex", alignItems: "center", gap: 6, color: camState === "active" ? alertRed : textSecondary, fontWeight: 700, fontSize: 11, whiteSpace: "nowrap" }}>
                   {camState === "active" && <span style={{ width: 7, height: 7, borderRadius: "50%", background: alertRed, display: "inline-block", animation: "blink 1.2s infinite" }} />}
                   {camState === "active" ? "LIVE" : camState === "requesting" ? "CONNECTING…" : "OFFLINE"}
                 </span>
               </div>
+
+              {/* Hidden capture canvas (off-screen) */}
+              <canvas ref={captureRef} style={{ display: "none" }} />
+
               {/* Viewport */}
               <div style={{ position: "relative", width: "100%", aspectRatio: "16/7", background: t.camBg, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden" }}>
                 <video ref={videoRef} muted playsInline style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover", display: camState === "active" ? "block" : "none" }} />
-                <canvas ref={canvasRef} style={{ position: "absolute", inset: 0, width: "100%", height: "100%", pointerEvents: "none", display: camState === "active" ? "block" : "none" }} />
+                {/* Detection overlay — webcam mode only */}
+                <canvas ref={canvasRef} style={{ position: "absolute", inset: 0, width: "100%", height: "100%", pointerEvents: "none", display: camSource === "webcam" && camState === "active" ? "block" : "none" }} />
                 <div style={{ position: "absolute", inset: 0, backgroundImage: "repeating-linear-gradient(0deg, transparent, transparent 3px, rgba(255,255,255,0.015) 3px, rgba(255,255,255,0.015) 4px)", pointerEvents: "none" }} />
-                {[{ top: 12, left: 12, borderTop: `2px solid ${t.bracketColor}`, borderLeft: `2px solid ${t.bracketColor}` }, { top: 12, right: 12, borderTop: `2px solid ${t.bracketColor}`, borderRight: `2px solid ${t.bracketColor}` }, { bottom: 12, left: 12, borderBottom: `2px solid ${t.bracketColor}`, borderLeft: `2px solid ${t.bracketColor}` }, { bottom: 12, right: 12, borderBottom: `2px solid ${t.bracketColor}`, borderRight: `2px solid ${t.bracketColor}` }].map((s, i) => (
-                  <div key={i} style={{ position: "absolute", width: 18, height: 18, ...s }} />
-                ))}
+                {[
+                  { top: 12, left: 12,     borderTop:    `2px solid ${t.bracketColor}`, borderLeft:   `2px solid ${t.bracketColor}` },
+                  { top: 12, right: 12,    borderTop:    `2px solid ${t.bracketColor}`, borderRight:  `2px solid ${t.bracketColor}` },
+                  { bottom: 12, left: 12,  borderBottom: `2px solid ${t.bracketColor}`, borderLeft:   `2px solid ${t.bracketColor}` },
+                  { bottom: 12, right: 12, borderBottom: `2px solid ${t.bracketColor}`, borderRight:  `2px solid ${t.bracketColor}` },
+                ].map((s, i) => <div key={i} style={{ position: "absolute", width: 18, height: 18, ...s }} />)}
                 {camState !== "active" && (
                   <div style={{ textAlign: "center", color: textSecondary, fontSize: 12, zIndex: 1 }}>
                     <div style={{ fontSize: 36, marginBottom: 8 }}>{camSource === "xiao" ? "🔌" : "📷"}</div>
-                    {camState === "error" ? <div style={{ color: alertRed }}>{camError}</div> : <div>{idleHint}</div>}
+                    {camState === "error"
+                      ? <div style={{ color: alertRed }}>{camError}</div>
+                      : camSource === "xiao"
+                        ? <div>Enter the XIAO stream URL above and press <strong style={{ color: accent }}>Connect</strong></div>
+                        : <div>Press <strong style={{ color: accent }}>Connect</strong> to open your webcam</div>
+                    }
                   </div>
                 )}
               </div>
-              {/* Controls */}
+
+              {/* Connect / Stop button */}
               <div style={{ padding: "10px 14px", borderTop: `1px solid ${border}`, display: "flex", justifyContent: "center" }}>
                 {camState !== "active"
-                  ? <button onClick={startCamera} style={btnStyle(accent, font)}>{camSource === "xiao" ? "🔌 Connect" : "▶ Start Camera"}</button>
+                  ? <button onClick={startCamera} style={btnStyle(accent, font)}>🔌 Connect</button>
                   : <button onClick={stopCamera}  style={btnStyle(alertRed, font)}>■ Stop</button>
                 }
               </div>
@@ -468,7 +463,6 @@ export default function SmartShelfDashboard() {
               <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 16 }}>
                 {PRODUCTS.map((p) => {
                   const count  = stocks ? stocks[p.id] : null;
-                  const pct    = count != null ? Math.round((count / p.max) * 100) : null;
                   const status = count == null ? "idle" : count === 0 ? "empty" : count <= 3 ? "low" : "ok";
                   const alertYellow = "#FBBF24";
                   const isAlert     = status === "empty" || status === "low";
@@ -484,15 +478,12 @@ export default function SmartShelfDashboard() {
                         </div>
                         {isAlert && <span style={{ fontSize: 10, fontWeight: 700, padding: "3px 8px", borderRadius: 20, background: alertColor + "22", color: alertColor, border: `1px solid ${alertColor}50`, animation: "blink 1.4s infinite" }}>{status === "empty" ? "⛔ CRITICAL" : "⚠ WARNING"}</span>}
                       </div>
-                      <div style={{ display: "flex", alignItems: "baseline", gap: 6, marginBottom: 10 }}>
-                        <span style={{ fontSize: 40, fontWeight: 800, color: count == null ? textSecondary : statusColor, lineHeight: 1 }}>{count ?? "—"}</span>
-                        {count != null && <span style={{ fontSize: 13, color: textSecondary }}>/ {p.max}</span>}
-                      </div>
-                      <div style={{ height: 6, borderRadius: 3, background: border, overflow: "hidden", marginBottom: isAlert ? 12 : 0 }}>
-                        <div style={{ height: "100%", width: pct != null ? `${pct}%` : "0%", borderRadius: 3, background: statusColor, transition: "width 0.5s ease" }} />
+                      <div style={{ marginBottom: isAlert ? 12 : 0 }}>
+                        <span style={{ fontSize: 48, fontWeight: 800, color: count == null ? textSecondary : statusColor, lineHeight: 1 }}>{count ?? "—"}</span>
+                        {count != null && <span style={{ fontSize: 12, color: textSecondary, marginLeft: 8 }}>detected</span>}
                       </div>
                       {isAlert && (
-                        <div style={{ marginTop: 4, padding: "8px 12px", borderRadius: 6, background: alertColor + "18", border: `1px solid ${alertColor}40`, fontSize: 11, color: alertColor, fontWeight: 600 }}>
+                        <div style={{ padding: "8px 12px", borderRadius: 6, background: alertColor + "18", border: `1px solid ${alertColor}40`, fontSize: 11, color: alertColor, fontWeight: 600 }}>
                           {status === "empty" ? "⛔ No items detected — immediate restock required" : `⚠ Only ${count} item${count === 1 ? "" : "s"} left — restock soon`}
                         </div>
                       )}
@@ -505,7 +496,7 @@ export default function SmartShelfDashboard() {
         </div>
       )}
 
-      {/* PAGE: AI EVALUATION */}
+      {/* PAGE: HISTORY */}
       {page === "evaluation" && (
         <AiEvaluationPage t={t} font={font} inferLog={inferLog} totalRuns={totalRuns} avgLatency={avgLatency} />
       )}
