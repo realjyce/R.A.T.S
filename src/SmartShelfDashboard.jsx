@@ -334,6 +334,7 @@ export default function SmartShelfDashboard() {
 
   const NAV = [
     { id: "dashboard",  label: "📊 Dashboard" },
+    { id: "workflow",   label: "🔄 Workflow" },
     { id: "evaluation", label: "📋 History" },
   ];
 
@@ -496,12 +497,177 @@ export default function SmartShelfDashboard() {
         </div>
       )}
 
+      {/* PAGE: WORKFLOW */}
+      {page === "workflow" && <WorkflowPage t={t} />}
+
       {/* PAGE: HISTORY */}
       {page === "evaluation" && (
         <AiEvaluationPage t={t} font={font} inferLog={inferLog} totalRuns={totalRuns} avgLatency={avgLatency} />
       )}
 
       <style>{`@keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.2} }`}</style>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────
+//  WORKFLOW PAGE
+// ─────────────────────────────────────────────
+function WorkflowPage({ t }) {
+  const { bg, surface, surfaceAlt, border, textPrimary, textSecondary, accent, green } = t;
+
+  const FLOW = [
+    {
+      step: "01",
+      icon: "👤",
+      title: "Human Detected",
+      desc: "PIR Sensor AM312 detects motion near the shelf and triggers the system to wake up.",
+      color: "#FBBF24",
+      tag: "Hardware Trigger",
+    },
+    {
+      step: "02",
+      icon: "📷",
+      title: "Frame Captured",
+      desc: "XIAO ESP32-S3 Sense camera captures a frame of the shelf at up to 30 fps.",
+      color: "#38BDF8",
+      tag: "Edge Device",
+    },
+    {
+      step: "03",
+      icon: "🤖",
+      title: "ML Inference",
+      desc: "FOMO MobileNetV2 (on-device) or YOLO11n via Flask backend analyses the frame and detects product classes.",
+      color: "#22C55E",
+      tag: "AI Model",
+    },
+    {
+      step: "04",
+      icon: "📡",
+      title: "Data Transmitted",
+      desc: "Detection results (counts, bounding boxes, confidence) are sent over HTTP/JSON to the dashboard.",
+      color: "#A78BFA",
+      tag: "Network",
+    },
+    {
+      step: "05",
+      icon: "📊",
+      title: "Dashboard Updated",
+      desc: "React dashboard receives the data and updates product stock counts, alerts, and the inference log in real time.",
+      color: accent,
+      tag: "Dashboard",
+    },
+  ];
+
+  const MODES = [
+    {
+      icon: "🔌",
+      title: "XIAO ESP32-S3 Mode",
+      color: "#38BDF8",
+      rows: [
+        { label: "Camera",    value: "OV2640 on XIAO ESP32-S3" },
+        { label: "Model",     value: "FOMO MobileNetV2 (Edge Impulse)" },
+        { label: "Inference", value: "On-device (MCU)" },
+        { label: "Output",    value: "MJPEG stream + /status JSON" },
+        { label: "Latency",   value: "~50–150 ms" },
+      ],
+    },
+    {
+      icon: "📷",
+      title: "Webcam Mode",
+      color: "#22C55E",
+      rows: [
+        { label: "Camera",    value: "Browser getUserMedia API" },
+        { label: "Model",     value: "YOLO11n (best.pt)" },
+        { label: "Inference", value: "Flask backend (CPU/GPU)" },
+        { label: "Output",    value: "POST /detect → JSON detections" },
+        { label: "Latency",   value: "~30–120 ms" },
+      ],
+    },
+  ];
+
+  const STACK = [
+    { layer: "Hardware",  items: ["XIAO ESP32-S3 Sense", "PIR Sensor AM312"],                          color: "#FBBF24" },
+    { layer: "ML",        items: ["Edge Impulse", "FOMO MobileNetV2", "YOLO11n (best.pt)"],            color: "#22C55E" },
+    { layer: "Backend",   items: ["Python Flask", "Ultralytics", "OpenCV", "PyTorch"],                 color: "#A78BFA" },
+    { layer: "Frontend",  items: ["React + Vite", "WebRTC getUserMedia", "Canvas API", "Fetch API"],   color: "#38BDF8" },
+  ];
+
+  return (
+    <div style={{ padding: "24px 28px", display: "flex", flexDirection: "column", gap: 32 }}>
+
+      {/* MAIN FLOW */}
+      <div>
+        <SectionLabel color={textSecondary}>System Flow</SectionLabel>
+        <div style={{ display: "flex", alignItems: "stretch", gap: 0 }}>
+          {FLOW.map((s, i) => (
+            <div key={s.step} style={{ display: "flex", alignItems: "center", flex: 1 }}>
+              {/* Card */}
+              <div style={{ flex: 1, background: surfaceAlt, border: `1px solid ${border}`, borderTop: `3px solid ${s.color}`, borderRadius: 10, padding: "18px 16px", position: "relative" }}>
+                {/* Step badge */}
+                <div style={{ position: "absolute", top: 12, right: 12, fontSize: 9, fontWeight: 700, color: s.color, background: s.color + "18", border: `1px solid ${s.color}40`, borderRadius: 20, padding: "2px 7px", letterSpacing: "0.05em" }}>
+                  {s.tag}
+                </div>
+                <div style={{ fontSize: 28, marginBottom: 10 }}>{s.icon}</div>
+                <div style={{ fontSize: 9, fontWeight: 700, color: s.color, letterSpacing: "0.08em", marginBottom: 4 }}>STEP {s.step}</div>
+                <div style={{ fontSize: 13, fontWeight: 700, color: textPrimary, marginBottom: 8 }}>{s.title}</div>
+                <div style={{ fontSize: 11, color: textSecondary, lineHeight: 1.6 }}>{s.desc}</div>
+              </div>
+              {/* Arrow */}
+              {i < FLOW.length - 1 && (
+                <div style={{ flexShrink: 0, width: 28, display: "flex", flexDirection: "column", alignItems: "center", gap: 2 }}>
+                  <div style={{ width: "100%", height: 2, background: `linear-gradient(90deg, ${FLOW[i].color}, ${FLOW[i+1].color})`, borderRadius: 1 }} />
+                  <div style={{ width: 0, height: 0, borderTop: "5px solid transparent", borderBottom: "5px solid transparent", borderLeft: `7px solid ${FLOW[i+1].color}`, marginTop: -7, alignSelf: "flex-end", marginRight: -1 }} />
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* OPERATING MODES */}
+      <div>
+        <SectionLabel color={textSecondary}>Operating Modes</SectionLabel>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+          {MODES.map((m) => (
+            <div key={m.title} style={{ background: surfaceAlt, border: `1px solid ${border}`, borderTop: `3px solid ${m.color}`, borderRadius: 10, overflow: "hidden" }}>
+              <div style={{ padding: "14px 18px 10px", display: "flex", alignItems: "center", gap: 10, borderBottom: `1px solid ${border}` }}>
+                <span style={{ fontSize: 20 }}>{m.icon}</span>
+                <span style={{ fontWeight: 700, fontSize: 14, color: textPrimary }}>{m.title}</span>
+              </div>
+              <div style={{ padding: "10px 0" }}>
+                {m.rows.map((r) => (
+                  <div key={r.label} style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", padding: "6px 18px", gap: 12 }}>
+                    <span style={{ fontSize: 11, color: textSecondary, flexShrink: 0 }}>{r.label}</span>
+                    <span style={{ fontSize: 11, fontWeight: 600, color: textPrimary, textAlign: "right" }}>{r.value}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* TECH STACK */}
+      <div>
+        <SectionLabel color={textSecondary}>Tech Stack</SectionLabel>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 14 }}>
+          {STACK.map((s) => (
+            <div key={s.layer} style={{ background: surfaceAlt, border: `1px solid ${border}`, borderTop: `3px solid ${s.color}`, borderRadius: 10, padding: "14px 16px" }}>
+              <div style={{ fontSize: 10, fontWeight: 700, color: s.color, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 12 }}>{s.layer}</div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+                {s.items.map((item) => (
+                  <div key={item} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <div style={{ width: 5, height: 5, borderRadius: "50%", background: s.color, flexShrink: 0 }} />
+                    <span style={{ fontSize: 11, color: textPrimary }}>{item}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
     </div>
   );
 }
