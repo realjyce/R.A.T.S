@@ -237,8 +237,7 @@ export default function SmartShelfDashboard() {
   const captureRef  = useRef(null);   // hidden canvas for frame capture
   const inferRef    = useRef(null);
   const latencies   = useRef([]);
-
-  const streamRef = useRef(null);
+  const streamRef   = useRef(null);
 
   // ── Draw YOLO boxes on overlay canvas ─────────────────────────
   const drawBoxes = useCallback((detections, vw, vh) => {
