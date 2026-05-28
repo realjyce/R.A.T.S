@@ -13,18 +13,30 @@ Three product classes are tracked out of the box: **bottle**, **snack**, **cup**
 You need Python 3 and Node.js installed.
 
 ```bash
-# 1. Install backend dependencies
+# 1. Create and activate a Python virtual environment
+python -m venv .venv
+
+# Windows (PowerShell)
+.venv\Scripts\Activate.ps1
+# Windows (cmd)
+.venv\Scripts\activate.bat
+# macOS / Linux
+source .venv/bin/activate
+
+# 2. Install backend dependencies (inside the venv)
 pip install -r requirements.txt
 
-# 2. Install frontend dependencies
+# 3. Install frontend dependencies
 npm install
 
-# 3. Start the detection backend (Flask on :5000)
+# 4. Start the detection backend (Flask on :5000)
 python server.py
 
-# 4. In another terminal, start the dashboard (Vite on :5173)
+# 5. In another terminal, start the dashboard (Vite on :5173)
 npm run dev
 ```
+
+> The `.venv/` folder is already gitignored. Re-activate the venv in every new terminal before running `python server.py`.
 
 Open <http://localhost:5173> and pick a camera source on the dashboard.
 
