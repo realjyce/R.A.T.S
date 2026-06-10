@@ -286,15 +286,15 @@ export default function SmartShelfDashboard() {
     } catch { /* backend not reachable */ }
   }, [drawBoxes]);
 
-  // ── XIAO: backend pulls a device frame, runs YOLO, returns counts ─
+  // ── XIAO: backend proxies the device stream; we poll it for live counts ─
+  // Video comes smoothly from /xiao_stream; here we just fetch YOLO results on
+  // the latest streamed frame and draw boxes over the live preview.
   const pollStocks = useCallback(async () => {
-    if (!xiaoUrl) return;
     try {
-      const res  = await fetch("/detect_xiao", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: xiaoUrl }) });
+      const res = await fetch("/xiao_counts");
+      if (!res.ok) return;            // 503 until the first frame arrives
       const data = await res.json();
       if (!data.counts) return;
-      // Preview the exact frame the model saw, with boxes drawn in sync
-      if (xiaoImgRef.current && data.frame) xiaoImgRef.current.src = data.frame;
       if (data.detections && data.w && data.h) drawBoxes(data.detections, data.w, data.h);
       setStocks(data.counts);
       const latency = data.latency ?? 0;
@@ -303,8 +303,8 @@ export default function SmartShelfDashboard() {
       setTotalRuns((n) => n + 1);
       setAvgLatency(avg);
       setInferLog((prev) => [{ time: formatTime(new Date()), latency, counts: data.counts, detections: data.detections, id: Date.now() }, ...prev.slice(0, 49)]);
-    } catch { /* backend or device not reachable */ }
-  }, [xiaoUrl, drawBoxes]);
+    } catch { /* backend not reachable */ }
+  }, [drawBoxes]);
 
   const startCamera = useCallback(async () => {
     setCamState("requesting"); setCamError("");
@@ -315,11 +315,13 @@ export default function SmartShelfDashboard() {
         if (videoRef.current) { videoRef.current.srcObject = stream; videoRef.current.src = ""; await videoRef.current.play(); }
         inferRef.current = setInterval(runDetection, 2000);
       } else {
-        // XIAO: the device can't stream + capture at the same time, so the
-        // backend pulls /capture frames, runs YOLO, and returns each frame for
-        // preview. One camera consumer, no stream/capture conflict.
-        inferRef.current = setInterval(pollStocks, 2000);
-        pollStocks(); // immediate first poll instead of waiting 2s
+        // XIAO: backend becomes the single consumer of the device /stream — it
+        // re-streams smooth video (/xiao_stream) and runs YOLO on live frames
+        // (/xiao_counts). One device connection → no stream/capture conflict.
+        const r = await fetch("/xiao_start", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: xiaoUrl }) });
+        if (!r.ok) throw new Error("Could not start XIAO stream");
+        if (xiaoImgRef.current) xiaoImgRef.current.src = "/xiao_stream?t=" + Date.now();
+        inferRef.current = setInterval(pollStocks, 1500);
       }
       setCamState("active");
     } catch (err) { setCamState("error"); setCamError(err.message || "Could not connect"); }
@@ -330,7 +332,8 @@ export default function SmartShelfDashboard() {
     streamRef.current?.getTracks().forEach((tr) => tr.stop());
     streamRef.current = null;
     if (videoRef.current) { videoRef.current.srcObject = null; videoRef.current.src = ""; }
-    if (xiaoImgRef.current) xiaoImgRef.current.src = "";   // stop MJPEG stream
+    if (xiaoImgRef.current) xiaoImgRef.current.src = "";   // close the proxied MJPEG <img>
+    fetch("/xiao_stop", { method: "POST" }).catch(() => {}); // backend drops the device connection
     if (canvasRef.current) { const ctx = canvasRef.current.getContext("2d"); ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height); }
     setCamState("idle"); setStocks(null);
   }, []);
@@ -432,15 +435,15 @@ export default function SmartShelfDashboard() {
 
               {/* Viewport */}
               <div style={{ position: "relative", width: "100%", aspectRatio: "16/7", background: t.camBg, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden" }}>
-                <video ref={videoRef} muted playsInline style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover", display: camSource === "webcam" && camState === "active" ? "block" : "none" }} />
-                {/* XIAO preview — the /capture frame the model ran on (rendered via <img>) */}
+                <video ref={videoRef} muted playsInline style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "contain", display: camSource === "webcam" && camState === "active" ? "block" : "none" }} />
+                {/* XIAO preview — smooth video proxied from the device via /xiao_stream */}
                 <img
                   ref={xiaoImgRef}
                   alt=""
-                  style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover", display: camSource === "xiao" && camState === "active" ? "block" : "none" }}
+                  style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "contain", display: camSource === "xiao" && camState === "active" ? "block" : "none" }}
                 />
-                {/* Detection overlay — boxes for webcam and XIAO */}
-                <canvas ref={canvasRef} style={{ position: "absolute", inset: 0, width: "100%", height: "100%", pointerEvents: "none", display: camState === "active" ? "block" : "none" }} />
+                {/* Detection overlay — objectFit must match the media so boxes align */}
+                <canvas ref={canvasRef} style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "contain", pointerEvents: "none", display: camState === "active" ? "block" : "none" }} />
                 <div style={{ position: "absolute", inset: 0, backgroundImage: "repeating-linear-gradient(0deg, transparent, transparent 3px, rgba(255,255,255,0.015) 3px, rgba(255,255,255,0.015) 4px)", pointerEvents: "none" }} />
                 {[
                   { top: 12, left: 12,     borderTop:    `2px solid ${t.bracketColor}`, borderLeft:   `2px solid ${t.bracketColor}` },
