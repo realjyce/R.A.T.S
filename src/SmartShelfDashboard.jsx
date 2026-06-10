@@ -224,7 +224,7 @@ export default function SmartShelfDashboard() {
   const { bg, surface, surfaceAlt, border, textPrimary, textSecondary, accent, alertRed, green } = t;
 
   const [camSource, setCamSource] = useState("xiao"); // "xiao" | "webcam"
-  const [xiaoUrl,   setXiaoUrl]  = useState("http://192.168.4.1/stream");
+  const [xiaoUrl,   setXiaoUrl]  = useState(""); // e.g. http://192.168.1.50/stream — device's LAN IP from Serial Monitor
   const [camState,  setCamState] = useState("idle"); // idle | requesting | active | error
   const [camError,  setCamError] = useState("");
   const [inferLog, setInferLog] = useState([]);
@@ -233,6 +233,7 @@ export default function SmartShelfDashboard() {
   const [stocks,    setStocks]   = useState(null);
 
   const videoRef    = useRef(null);
+  const xiaoImgRef  = useRef(null);   // captured-frame preview (xiao mode)
   const canvasRef   = useRef(null);   // detection overlay (webcam mode)
   const captureRef  = useRef(null);   // hidden canvas for frame capture
   const inferRef    = useRef(null);
@@ -285,23 +286,25 @@ export default function SmartShelfDashboard() {
     } catch { /* backend not reachable */ }
   }, [drawBoxes]);
 
-  // ── XIAO: poll /status for stock counts ───────────────────────
+  // ── XIAO: backend pulls a device frame, runs YOLO, returns counts ─
   const pollStocks = useCallback(async () => {
+    if (!xiaoUrl) return;
     try {
-      const base = xiaoUrl.replace("/stream", "");
-      const res  = await fetch(`${base}/status`, { signal: AbortSignal.timeout(2000) });
+      const res  = await fetch("/detect_xiao", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: xiaoUrl }) });
       const data = await res.json();
-      if (data.counts) {
-        setStocks(data.counts);
-        const latency = data.latency ?? 0;
-        latencies.current = [...latencies.current.slice(-29), latency];
-        const avg = Math.round(latencies.current.reduce((a, b) => a + b, 0) / latencies.current.length);
-        setTotalRuns((n) => n + 1);
-        setAvgLatency(avg);
-        setInferLog((prev) => [{ time: formatTime(new Date()), latency, counts: data.counts, id: Date.now() }, ...prev.slice(0, 49)]);
-      }
-    } catch { /* silently skip */ }
-  }, [xiaoUrl]);
+      if (!data.counts) return;
+      // Preview the exact frame the model saw, with boxes drawn in sync
+      if (xiaoImgRef.current && data.frame) xiaoImgRef.current.src = data.frame;
+      if (data.detections && data.w && data.h) drawBoxes(data.detections, data.w, data.h);
+      setStocks(data.counts);
+      const latency = data.latency ?? 0;
+      latencies.current = [...latencies.current.slice(-29), latency];
+      const avg = Math.round(latencies.current.reduce((a, b) => a + b, 0) / latencies.current.length);
+      setTotalRuns((n) => n + 1);
+      setAvgLatency(avg);
+      setInferLog((prev) => [{ time: formatTime(new Date()), latency, counts: data.counts, detections: data.detections, id: Date.now() }, ...prev.slice(0, 49)]);
+    } catch { /* backend or device not reachable */ }
+  }, [xiaoUrl, drawBoxes]);
 
   const startCamera = useCallback(async () => {
     setCamState("requesting"); setCamError("");
@@ -312,8 +315,11 @@ export default function SmartShelfDashboard() {
         if (videoRef.current) { videoRef.current.srcObject = stream; videoRef.current.src = ""; await videoRef.current.play(); }
         inferRef.current = setInterval(runDetection, 2000);
       } else {
-        if (videoRef.current) { videoRef.current.srcObject = null; videoRef.current.src = xiaoUrl; await videoRef.current.play(); }
+        // XIAO: the device can't stream + capture at the same time, so the
+        // backend pulls /capture frames, runs YOLO, and returns each frame for
+        // preview. One camera consumer, no stream/capture conflict.
         inferRef.current = setInterval(pollStocks, 2000);
+        pollStocks(); // immediate first poll instead of waiting 2s
       }
       setCamState("active");
     } catch (err) { setCamState("error"); setCamError(err.message || "Could not connect"); }
@@ -324,6 +330,7 @@ export default function SmartShelfDashboard() {
     streamRef.current?.getTracks().forEach((tr) => tr.stop());
     streamRef.current = null;
     if (videoRef.current) { videoRef.current.srcObject = null; videoRef.current.src = ""; }
+    if (xiaoImgRef.current) xiaoImgRef.current.src = "";   // stop MJPEG stream
     if (canvasRef.current) { const ctx = canvasRef.current.getContext("2d"); ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height); }
     setCamState("idle"); setStocks(null);
   }, []);
@@ -408,7 +415,7 @@ export default function SmartShelfDashboard() {
                   <input
                     value={xiaoUrl}
                     onChange={(e) => setXiaoUrl(e.target.value)}
-                    placeholder="http://192.168.4.1/stream"
+                    placeholder="http://<device-ip>/stream  (see Serial Monitor)"
                     style={{ background: bg, border: `1px solid ${border}`, borderRadius: 6, color: textPrimary, fontFamily: font, fontSize: 11, padding: "4px 10px", flex: 1, outline: "none" }}
                   />
                 )}
@@ -425,9 +432,15 @@ export default function SmartShelfDashboard() {
 
               {/* Viewport */}
               <div style={{ position: "relative", width: "100%", aspectRatio: "16/7", background: t.camBg, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden" }}>
-                <video ref={videoRef} muted playsInline style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover", display: camState === "active" ? "block" : "none" }} />
-                {/* Detection overlay — webcam mode only */}
-                <canvas ref={canvasRef} style={{ position: "absolute", inset: 0, width: "100%", height: "100%", pointerEvents: "none", display: camSource === "webcam" && camState === "active" ? "block" : "none" }} />
+                <video ref={videoRef} muted playsInline style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover", display: camSource === "webcam" && camState === "active" ? "block" : "none" }} />
+                {/* XIAO preview — the /capture frame the model ran on (rendered via <img>) */}
+                <img
+                  ref={xiaoImgRef}
+                  alt=""
+                  style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover", display: camSource === "xiao" && camState === "active" ? "block" : "none" }}
+                />
+                {/* Detection overlay — boxes for webcam and XIAO */}
+                <canvas ref={canvasRef} style={{ position: "absolute", inset: 0, width: "100%", height: "100%", pointerEvents: "none", display: camState === "active" ? "block" : "none" }} />
                 <div style={{ position: "absolute", inset: 0, backgroundImage: "repeating-linear-gradient(0deg, transparent, transparent 3px, rgba(255,255,255,0.015) 3px, rgba(255,255,255,0.015) 4px)", pointerEvents: "none" }} />
                 {[
                   { top: 12, left: 12,     borderTop:    `2px solid ${t.bracketColor}`, borderLeft:   `2px solid ${t.bracketColor}` },
@@ -441,7 +454,7 @@ export default function SmartShelfDashboard() {
                     {camState === "error"
                       ? <div style={{ color: alertRed }}>{camError}</div>
                       : camSource === "xiao"
-                        ? <div>Enter the XIAO stream URL above and press <strong style={{ color: accent }}>Connect</strong></div>
+                        ? <div>Enter the XIAO stream URL (e.g. <code>http://192.168.1.50/stream</code>) above and press <strong style={{ color: accent }}>Connect</strong></div>
                         : <div>Press <strong style={{ color: accent }}>Connect</strong> to open your webcam</div>
                     }
                   </div>

@@ -5,6 +5,8 @@ Run:  python server.py
 """
 
 import base64, time
+from urllib.parse import urlparse
+import requests
 import numpy as np
 import cv2
 from flask import Flask, request, jsonify
@@ -21,21 +23,8 @@ model = YOLO(MODEL_PATH)
 # Map model class names → dashboard product IDs
 CLASS_MAP = {name: name for name in model.names.values()}
 
-@app.route("/detect", methods=["POST"])
-def detect():
-    data = request.get_json(force=True)
-    if not data or "image" not in data:
-        return jsonify({"error": "No image provided"}), 400
-
-    # Decode base64 frame
-    header, encoded = data["image"].split(",", 1)
-    img_bytes = base64.b64decode(encoded)
-    nparr     = np.frombuffer(img_bytes, np.uint8)
-    img       = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-
-    if img is None:
-        return jsonify({"error": "Invalid image"}), 400
-
+def run_inference(img):
+    """Run YOLO on a decoded BGR frame → {detections, counts, latency}."""
     t0      = time.perf_counter()
     results = model(img, verbose=False)[0]
     latency = int((time.perf_counter() - t0) * 1000)
@@ -57,11 +46,57 @@ def detect():
             "label": label,
         })
 
-    return jsonify({
-        "detections": detections,
-        "counts":     counts,
-        "latency":    latency,
-    })
+    return {"detections": detections, "counts": counts, "latency": latency}
+
+@app.route("/detect", methods=["POST"])
+def detect():
+    data = request.get_json(force=True)
+    if not data or "image" not in data:
+        return jsonify({"error": "No image provided"}), 400
+
+    # Decode base64 frame
+    header, encoded = data["image"].split(",", 1)
+    img_bytes = base64.b64decode(encoded)
+    nparr     = np.frombuffer(img_bytes, np.uint8)
+    img       = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
+    if img is None:
+        return jsonify({"error": "Invalid image"}), 400
+
+    return jsonify(run_inference(img))
+
+@app.route("/detect_xiao", methods=["POST"])
+def detect_xiao():
+    """Pull one JPEG frame from a XIAO device's /capture endpoint and run YOLO.
+    Body: {"url": "http://<device-ip>/stream"} (any URL on the device works)."""
+    data = request.get_json(force=True)
+    url  = (data or {}).get("url", "").strip()
+    if not url:
+        return jsonify({"error": "No url provided"}), 400
+
+    parsed = urlparse(url)
+    if not parsed.scheme or not parsed.netloc:
+        return jsonify({"error": "Invalid url"}), 400
+    capture_url = f"{parsed.scheme}://{parsed.netloc}/capture"
+
+    try:
+        r = requests.get(capture_url, timeout=4)
+        r.raise_for_status()
+    except requests.RequestException as e:
+        return jsonify({"error": f"Could not reach device: {e}"}), 502
+
+    nparr = np.frombuffer(r.content, np.uint8)
+    img   = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    if img is None:
+        return jsonify({"error": "Invalid frame from device"}), 502
+
+    result = run_inference(img)
+    h, w   = img.shape[:2]
+    # Echo the captured frame back so the dashboard previews the exact image
+    # the model saw — the device can't stream + capture at the same time.
+    result["frame"] = "data:image/jpeg;base64," + base64.b64encode(r.content).decode("ascii")
+    result["w"], result["h"] = w, h
+    return jsonify(result)
 
 @app.route("/health")
 def health():

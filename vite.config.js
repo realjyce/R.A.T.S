@@ -5,9 +5,10 @@ export default defineConfig({
   plugins: [react()],
   server: {
     proxy: {
-      "/detect":  "http://localhost:5000",
-      "/health":  "http://localhost:5000",
-      "/metrics": "http://localhost:5000",
+      "/detect_xiao": "http://localhost:5000",
+      "/detect":      "http://localhost:5000",
+      "/health":      "http://localhost:5000",
+      "/metrics":     "http://localhost:5000",
     },
   },
 });
