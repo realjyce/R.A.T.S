@@ -17,6 +17,12 @@ function formatTime(d) {
   return d.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
 
+// Normalize the XIAO device URL to its base (drop trailing slash + any path),
+// so "http://192.168.45.86", ".../", or ".../stream" all resolve to the host.
+function deviceBase(url) {
+  return (url || "").trim().replace(/\/+$/, "").replace(/\/(stream|status|capture)$/i, "");
+}
+
 const THEMES = {
   dark: {
     bg: "#0B0E14", surface: "#141922", surfaceAlt: "#1A2030",
@@ -224,7 +230,7 @@ export default function SmartShelfDashboard() {
   const { bg, surface, surfaceAlt, border, textPrimary, textSecondary, accent, alertRed, green } = t;
 
   const [camSource, setCamSource] = useState("xiao"); // "xiao" | "webcam"
-  const [xiaoUrl,   setXiaoUrl]  = useState(""); // e.g. http://192.168.1.50/stream — device's LAN IP from Serial Monitor
+  const [xiaoUrl,   setXiaoUrl]  = useState(""); // e.g. http://192.168.45.86 — device's LAN IP from Serial Monitor
   const [camState,  setCamState] = useState("idle"); // idle | requesting | active | error
   const [camError,  setCamError] = useState("");
   const [inferLog, setInferLog] = useState([]);
@@ -239,6 +245,8 @@ export default function SmartShelfDashboard() {
   const inferRef    = useRef(null);
   const latencies   = useRef([]);
   const streamRef   = useRef(null);
+  const pollBusy    = useRef(false);   // guard: one device poll in flight at a time
+  const countHist   = useRef([]);      // recent count readings for temporal smoothing
 
   // ── Draw YOLO boxes on overlay canvas ─────────────────────────
   const drawBoxes = useCallback((detections, vw, vh) => {
@@ -248,17 +256,17 @@ export default function SmartShelfDashboard() {
     const ctx = canvas.getContext("2d");
     ctx.clearRect(0, 0, vw, vh);
     const COLORS = { bottle: "#38BDF8", snack: "#F97316", cup: "#22C55E" };
-    detections.forEach(({ x1, y1, x2, y2, label, conf }) => {
+    detections.forEach(({ x1, y1, x2, y2, label }) => {
       const color = COLORS[label] ?? "#FFFFFF";
-      ctx.strokeStyle = color; ctx.lineWidth = 2;
-      ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+      const cx = (x1 + x2) / 2, cy = (y1 + y2) / 2;
+      // single colored dot per detection (no box, no confidence label)
+      ctx.beginPath();
+      ctx.arc(cx, cy, 6, 0, Math.PI * 2);
       ctx.fillStyle = color;
-      ctx.beginPath(); ctx.arc((x1+x2)/2, (y1+y2)/2, 4, 0, Math.PI*2); ctx.fill();
-      const txt = `${label} ${(conf*100).toFixed(0)}%`;
-      ctx.font = "bold 11px monospace";
-      const tw = ctx.measureText(txt).width;
-      ctx.fillStyle = color + "CC"; ctx.fillRect(x1, y1 - 18, tw + 10, 18);
-      ctx.fillStyle = "#000"; ctx.fillText(txt, x1 + 5, y1 - 4);
+      ctx.fill();
+      ctx.lineWidth = 1.5;
+      ctx.strokeStyle = "rgba(0,0,0,0.5)"; // thin outline so it reads on any bg
+      ctx.stroke();
     });
   }, []);
 
@@ -286,25 +294,47 @@ export default function SmartShelfDashboard() {
     } catch { /* backend not reachable */ }
   }, [drawBoxes]);
 
-  // ── XIAO: backend proxies the device stream; we poll it for live counts ─
-  // Video comes smoothly from /xiao_stream; here we just fetch YOLO results on
-  // the latest streamed frame and draw boxes over the live preview.
+  // ── XIAO: device runs FOMO on-device; we poll /status for counts directly ─
+  // The device returns pre-counted results (no bounding boxes), so there's no
+  // overlay. Preview comes from /capture snapshots refreshed each poll, since
+  // the on-device server has no continuous MJPEG stream.
   const pollStocks = useCallback(async () => {
+    const base = deviceBase(xiaoUrl);
+    if (!base || pollBusy.current) return;   // skip if the previous poll is still pending
+    pollBusy.current = true;
     try {
-      const res = await fetch("/xiao_counts");
-      if (!res.ok) return;            // 503 until the first frame arrives
-      const data = await res.json();
-      if (!data.counts) return;
-      if (data.detections && data.w && data.h) drawBoxes(data.detections, data.w, data.h);
-      setStocks(data.counts);
-      const latency = data.latency ?? 0;
-      latencies.current = [...latencies.current.slice(-29), latency];
-      const avg = Math.round(latencies.current.reduce((a, b) => a + b, 0) / latencies.current.length);
-      setTotalRuns((n) => n + 1);
-      setAvgLatency(avg);
-      setInferLog((prev) => [{ time: formatTime(new Date()), latency, counts: data.counts, detections: data.detections, id: Date.now() }, ...prev.slice(0, 49)]);
-    } catch { /* backend not reachable */ }
-  }, [drawBoxes]);
+      const res = await fetch(`${base}/status`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.counts) {
+          // temporal smoothing: display the median of the last 5 readings per
+          // class, so a single jittery frame can't move the shown count.
+          const hist = [...countHist.current, data.counts].slice(-5);
+          countHist.current = hist;
+          const smoothed = {};
+          PRODUCTS.forEach((p) => {
+            const vals = hist.map((c) => c?.[p.id] ?? 0).sort((a, b) => a - b);
+            smoothed[p.id] = vals[Math.floor(vals.length / 2)];
+          });
+          setStocks(smoothed);
+          const latency = data.latency ?? 0;
+          latencies.current = [...latencies.current.slice(-29), latency];
+          const avg = Math.round(latencies.current.reduce((a, b) => a + b, 0) / latencies.current.length);
+          setTotalRuns((n) => n + 1);
+          setAvgLatency(avg);
+          setInferLog((prev) => [{ time: formatTime(new Date()), latency, counts: data.counts, detections: data.detections, id: Date.now() }, ...prev.slice(0, 49)]);
+          // draw detection markers on the overlay (boxes are in frame-pixel space)
+          if (data.w && data.h) drawBoxes(data.detections || [], data.w, data.h);
+          // refresh the preview only once the previous snapshot finished loading
+          const img = xiaoImgRef.current;
+          if (img && (img.complete || !img.getAttribute("src"))) {
+            img.src = `${base}/capture?t=${Date.now()}`;
+          }
+        }
+      }
+    } catch { /* device not reachable */ }
+    finally { pollBusy.current = false; }
+  }, [xiaoUrl, drawBoxes]);
 
   const startCamera = useCallback(async () => {
     setCamState("requesting"); setCamError("");
@@ -315,13 +345,14 @@ export default function SmartShelfDashboard() {
         if (videoRef.current) { videoRef.current.srcObject = stream; videoRef.current.src = ""; await videoRef.current.play(); }
         inferRef.current = setInterval(runDetection, 2000);
       } else {
-        // XIAO: backend becomes the single consumer of the device /stream — it
-        // re-streams smooth video (/xiao_stream) and runs YOLO on live frames
-        // (/xiao_counts). One device connection → no stream/capture conflict.
-        const r = await fetch("/xiao_start", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: xiaoUrl }) });
-        if (!r.ok) throw new Error("Could not start XIAO stream");
-        if (xiaoImgRef.current) xiaoImgRef.current.src = "/xiao_stream?t=" + Date.now();
-        inferRef.current = setInterval(pollStocks, 1500);
+        // XIAO: device runs FOMO on-device. Talk to it directly — poll /status
+        // for counts and show /capture snapshots. No backend involved.
+        const base = deviceBase(xiaoUrl);
+        if (!base) throw new Error("Enter the device URL, e.g. http://192.168.45.86");
+        const r = await fetch(`${base}/status`);   // confirm reachable (may take ~3s while it infers)
+        if (!r.ok) throw new Error("Device not reachable at " + base);
+        if (xiaoImgRef.current) xiaoImgRef.current.src = `${base}/capture?t=${Date.now()}`;
+        inferRef.current = setInterval(pollStocks, 3000); // ~matches on-device inference cadence
       }
       setCamState("active");
     } catch (err) { setCamState("error"); setCamError(err.message || "Could not connect"); }
@@ -332,9 +363,9 @@ export default function SmartShelfDashboard() {
     streamRef.current?.getTracks().forEach((tr) => tr.stop());
     streamRef.current = null;
     if (videoRef.current) { videoRef.current.srcObject = null; videoRef.current.src = ""; }
-    if (xiaoImgRef.current) xiaoImgRef.current.src = "";   // close the proxied MJPEG <img>
-    fetch("/xiao_stop", { method: "POST" }).catch(() => {}); // backend drops the device connection
+    if (xiaoImgRef.current) xiaoImgRef.current.src = "";   // stop refreshing the snapshot preview
     if (canvasRef.current) { const ctx = canvasRef.current.getContext("2d"); ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height); }
+    countHist.current = [];
     setCamState("idle"); setStocks(null);
   }, []);
 
@@ -391,9 +422,9 @@ export default function SmartShelfDashboard() {
             </div>
           </div>
 
-          {/* CAMERA PANEL */}
-          <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-            <div style={{ background: surfaceAlt, border: `1px solid ${border}`, borderRadius: 10, overflow: "hidden" }}>
+          {/* CAMERA PANEL + STOCK (side by side) */}
+          <div style={{ display: "flex", flexDirection: "row", flexWrap: "wrap", gap: 16, alignItems: "flex-start" }}>
+            <div style={{ flex: "2 1 480px", minWidth: 0, background: surfaceAlt, border: `1px solid ${border}`, borderRadius: 10, overflow: "hidden" }}>
 
               {/* Top bar: source toggle + URL + status */}
               <div style={{ padding: "8px 14px", borderBottom: `1px solid ${border}`, display: "flex", alignItems: "center", gap: 12 }}>
@@ -418,7 +449,7 @@ export default function SmartShelfDashboard() {
                   <input
                     value={xiaoUrl}
                     onChange={(e) => setXiaoUrl(e.target.value)}
-                    placeholder="http://<device-ip>/stream  (see Serial Monitor)"
+                    placeholder="http://192.168.45.86  (device IP from Serial Monitor)"
                     style={{ background: bg, border: `1px solid ${border}`, borderRadius: 6, color: textPrimary, fontFamily: font, fontSize: 11, padding: "4px 10px", flex: 1, outline: "none" }}
                   />
                 )}
@@ -436,7 +467,7 @@ export default function SmartShelfDashboard() {
               {/* Viewport */}
               <div style={{ position: "relative", width: "100%", aspectRatio: "16/7", background: t.camBg, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden" }}>
                 <video ref={videoRef} muted playsInline style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "contain", display: camSource === "webcam" && camState === "active" ? "block" : "none" }} />
-                {/* XIAO preview — smooth video proxied from the device via /xiao_stream */}
+                {/* XIAO preview — /capture snapshots refreshed each poll (no MJPEG on-device) */}
                 <img
                   ref={xiaoImgRef}
                   alt=""
@@ -473,10 +504,10 @@ export default function SmartShelfDashboard() {
               </div>
             </div>
 
-            {/* PRODUCT STOCK GRID */}
-            <div>
+            {/* PRODUCT STOCK GRID — sidebar beside the preview */}
+            <div style={{ flex: "1 1 280px", minWidth: 0 }}>
               <SectionLabel color={textSecondary}>Product Stock</SectionLabel>
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 16 }}>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 12 }}>
                 {PRODUCTS.map((p) => {
                   const count  = stocks ? stocks[p.id] : null;
                   const status = count == null ? "idle" : count === 0 ? "empty" : count <= 3 ? "low" : "ok";
