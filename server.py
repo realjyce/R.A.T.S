@@ -4,7 +4,7 @@ Loads model/best.pt and exposes POST /detect
 Run:  python server.py
 """
 
-import base64, time, threading
+import base64, time, threading, json, queue, itertools
 from urllib.parse import urlparse
 import requests
 import numpy as np
@@ -16,12 +16,100 @@ from ultralytics import YOLO
 MODEL_PATH = "model/best.pt"
 PORT       = 5000
 
+# ── Power / cost model assumptions (XIAO ESP32-S3 Sense, datasheet/typical) ──
+# These are NOMINAL figures used to project battery life from a REAL, device-
+# measured duty cycle. Swap in bench-measured values for a bulletproof demo.
+I_ACTIVE_MA       = 150.0    # camera + WiFi + FOMO inference, typical avg draw
+I_SLEEP_MA        = 0.014    # ~14 µA deep sleep (Seeed XIAO ESP32-S3 spec)
+DEFAULT_BATTERY   = 1000.0   # mAh — a small 1S LiPo; override via ?battery=
+COST_PER_SERVICE  = 5.0      # $ per recharge/replacement visit (labor+battery)
+
 app   = Flask(__name__)
 CORS(app)
 model = YOLO(MODEL_PATH)
 
+# Latest telemetry pushed by the deep-sleep device (held in RAM so the dashboard
+# power panel stays live even while the device itself is asleep & unreachable).
+_power = {"event": None, "boot_count": 0, "awake_us": 0, "total_us": 0,
+          "counts": {}, "ts": 0.0}
+
 # Map model class names → dashboard product IDs
 CLASS_MAP = {name: name for name in model.names.values()}
+
+# ── Edge alert engine ────────────────────────────────────────────────────────
+# The edge device (or webcam) feeds counts here; the server is the single source
+# of truth. An ALERT is raised only on a status TRANSITION (ok→low→empty, or a
+# restock back to ok) — i.e. "only sent when necessary", not every frame.
+LOW_THRESHOLD = 3            # ≤ this (and > 0) is "low"; 0 is "empty"
+
+def status_of(count):
+    return "empty" if count <= 0 else "low" if count <= LOW_THRESHOLD else "ok"
+
+SEVERITY = {"empty": "critical", "low": "warning", "ok": "info"}
+
+def alert_message(product, st, count):
+    label = product.capitalize()
+    if st == "empty": return f"{label} is OUT OF STOCK"
+    if st == "low":   return f"{label} running low — {count} left"
+    return f"{label} restocked — {count} in stock"
+
+_edge = {                    # latest world state, served to every new subscriber
+    "counts": {}, "statuses": {}, "latency": 0, "objects": 0,
+    "source": None, "device_id": None, "ts": 0.0,
+}
+_alerts       = []                       # most-recent-first, capped
+_prev_status  = {}                       # per-product last status, for transitions
+_alert_seq    = itertools.count(1)
+_edge_lock    = threading.Lock()
+
+# SSE pub/sub: one bounded queue per connected browser.
+_subscribers  = []
+_sub_lock     = threading.Lock()
+
+def _publish(event, data):
+    dead = []
+    with _sub_lock:
+        for q in _subscribers:
+            try:
+                q.put_nowait((event, data))
+            except queue.Full:
+                dead.append(q)
+        for q in dead:
+            _subscribers.remove(q)
+
+def _snapshot():
+    return {**_edge, "alerts": _alerts[:20]}
+
+def ingest_counts(counts, source, latency=0, device_id=None):
+    """Update world state from a reading and raise alerts on status changes."""
+    counts = {k: int(v) for k, v in counts.items()}
+    statuses, fresh = {}, []
+    with _edge_lock:
+        for prod, cnt in counts.items():
+            st = status_of(cnt)
+            statuses[prod] = st
+            prev = _prev_status.get(prod)
+            # Skip the first reading (baseline) so startup doesn't alert-storm.
+            if prev is not None and st != prev and (
+                st in ("low", "empty") or (st == "ok" and prev in ("low", "empty"))
+            ):
+                fresh.append({
+                    "id": next(_alert_seq), "ts": time.time(), "product": prod,
+                    "status": st, "count": cnt, "severity": SEVERITY[st],
+                    "message": alert_message(prod, st, cnt),
+                })
+            _prev_status[prod] = st
+        _edge.update({"counts": counts, "statuses": statuses, "latency": int(latency),
+                      "objects": sum(counts.values()), "source": source,
+                      "device_id": device_id, "ts": time.time()})
+        for a in fresh:
+            _alerts.insert(0, a)
+        del _alerts[50:]
+        snap = _snapshot()
+    _publish("state", snap)
+    for a in fresh:
+        _publish("alert", a)
+    return statuses
 
 def run_inference(img):
     """Run YOLO on a decoded BGR frame → {detections, counts, latency}."""
@@ -63,7 +151,10 @@ def detect():
     if img is None:
         return jsonify({"error": "Invalid image"}), 400
 
-    return jsonify(run_inference(img))
+    result = run_inference(img)
+    # Feed the alert engine so the realtime dashboard + alerts work from webcam too.
+    ingest_counts(result["counts"], "webcam", result["latency"])
+    return jsonify(result)
 
 class XiaoStream:
     """Single client of a XIAO device's /stream.
@@ -185,7 +276,111 @@ def xiao_counts():
     result = run_inference(img)
     h, w   = img.shape[:2]
     result["w"], result["h"] = w, h
+    ingest_counts(result["counts"], "xiao-proxy", result["latency"])
     return jsonify(result)
+
+@app.route("/xiao/push", methods=["POST"])
+def xiao_push():
+    """Deep-sleep device telemetry. The device POSTs this on each wake ('wake')
+    and just before sleeping ('sleep'), so the backend always holds the latest
+    accumulated awake/total time even while the device is offline asleep.
+    Body: {event, boot_count, awake_us, total_us, counts?}."""
+    d = request.get_json(force=True) or {}
+    _power.update({
+        "event":      d.get("event", "wake"),
+        "boot_count": int(d.get("boot_count", _power["boot_count"])),
+        "awake_us":   int(d.get("awake_us",   _power["awake_us"])),
+        "total_us":   int(d.get("total_us",   _power["total_us"])),
+        "counts":     d.get("counts", _power["counts"]),
+        "ts":         time.time(),
+    })
+    return jsonify({"ok": True})
+
+@app.route("/xiao/power")
+def xiao_power():
+    """Project battery life + cost from the device's REAL measured duty cycle.
+    Query overrides for live demo tweaks: ?battery=<mAh>&active=<mA>."""
+    battery  = float(request.args.get("battery", DEFAULT_BATTERY))
+    i_active = float(request.args.get("active",  I_ACTIVE_MA))
+
+    awake_us, total_us = _power["awake_us"], _power["total_us"]
+    duty   = (awake_us / total_us) if total_us > 0 else 0.0
+    duty   = min(max(duty, 0.0), 1.0)
+    avg_mA = i_active * duty + I_SLEEP_MA * (1.0 - duty)
+
+    life_deep  = (battery / avg_mA)   / 24.0 if avg_mA   > 0 else 0.0  # days
+    life_always = (battery / i_active) / 24.0 if i_active > 0 else 0.0  # days
+
+    def per_year(life_days):
+        return (365.0 / life_days) if life_days > 0 else 0.0
+    cost_deep   = per_year(life_deep)  * COST_PER_SERVICE
+    cost_always = per_year(life_always) * COST_PER_SERVICE
+
+    # 'asleep' if the most recent push said so (or none seen yet)
+    state = "asleep" if _power["event"] in (None, "sleep") else "awake"
+
+    return jsonify({
+        "state":        state,
+        "wake_count":   _power["boot_count"],
+        "last_seen_s":  round(time.time() - _power["ts"], 1) if _power["ts"] else None,
+        "duty_pct":     round(duty * 100, 2),
+        "avg_mA":       round(avg_mA, 3),
+        "counts":       _power["counts"],
+        "battery_mAh":  battery,
+        "i_active_mA":  i_active,
+        "i_sleep_mA":   I_SLEEP_MA,
+        "life_days_deepsleep": round(life_deep, 2),
+        "life_days_alwayson":  round(life_always, 3),
+        "energy_saved_pct":    round((1 - avg_mA / i_active) * 100, 1) if i_active else 0,
+        "cost_per_year_deepsleep": round(cost_deep, 2),
+        "cost_per_year_alwayson":  round(cost_always, 2),
+        "cost_per_service":        COST_PER_SERVICE,
+    })
+
+@app.route("/edge/ingest", methods=["POST"])
+def edge_ingest():
+    """Realtime push from the XIAO edge device. It runs FOMO locally and POSTs
+    its counts here (ideally only when they change). Body:
+    {device_id?, counts:{bottle:N,...}, latency?, objects?}."""
+    d = request.get_json(force=True) or {}
+    counts = d.get("counts") or {}
+    if not isinstance(counts, dict):
+        return jsonify({"error": "counts must be an object"}), 400
+    statuses = ingest_counts(counts, d.get("device_id", "xiao"),
+                             d.get("latency", 0), d.get("device_id"))
+    return jsonify({"ok": True, "statuses": statuses})
+
+@app.route("/edge/state")
+def edge_state():
+    """REST snapshot of the current world state + recent alerts (SSE fallback)."""
+    with _edge_lock:
+        return jsonify(_snapshot())
+
+@app.route("/edge/stream")
+def edge_stream_sse():
+    """Server-Sent Events: pushes 'state' and 'alert' events to the dashboard in
+    realtime. Every subscriber gets the current snapshot immediately on connect."""
+    def gen():
+        q = queue.Queue(maxsize=128)
+        with _sub_lock:
+            _subscribers.append(q)
+        try:
+            with _edge_lock:
+                snap = _snapshot()
+            yield f"event: state\ndata: {json.dumps(snap)}\n\n"
+            while True:
+                try:
+                    event, data = q.get(timeout=15)
+                    yield f"event: {event}\ndata: {json.dumps(data)}\n\n"
+                except queue.Empty:
+                    yield ": keepalive\n\n"      # comment frame keeps the connection open
+        finally:
+            with _sub_lock:
+                if q in _subscribers:
+                    _subscribers.remove(q)
+    return Response(gen(), mimetype="text/event-stream",
+                    headers={"Cache-Control": "no-cache",
+                             "X-Accel-Buffering": "no", "Connection": "keep-alive"})
 
 @app.route("/health")
 def health():

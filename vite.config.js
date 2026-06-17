@@ -9,6 +9,8 @@ export default defineConfig({
       "/xiao_stop":   "http://localhost:5000",
       "/xiao_stream": "http://localhost:5000",
       "/xiao_counts": "http://localhost:5000",
+      "/xiao":        "http://localhost:5000",
+      "/edge":        "http://localhost:5000",
       "/detect":      "http://localhost:5000",
       "/health":      "http://localhost:5000",
       "/metrics":     "http://localhost:5000",

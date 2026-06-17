@@ -158,10 +158,44 @@ dashboard can show **"Person present — counting paused"** vs **"Idle"** vs **"
 
 ## Open decisions (fill before building)
 
-1. **GPIO for PIR OUT:** ______ (plan: D1 / GPIO2)
-2. **Which mode first:** Mode 1 ▢ Mode 2 ▢ Combined ▢
-3. **Power-save flavour (if Mode 1/Combined):** light idle ▢ deep sleep ▢
+1. **GPIO for PIR OUT:** **D1 / GPIO2** (RTC-capable → valid `ext0` deep-sleep wake)
+2. **Which mode first:** Mode 1 ☑ (wake/trigger) — implemented as the deep-sleep demo
+3. **Power-save flavour (if Mode 1/Combined):** light idle ▢ **deep sleep ☑**
 
 ---
 
-*Status: planning note. Combined mode = future TODO. Single mode to be implemented first.*
+## Deep-Sleep Demo (IMPLEMENTED) — proving battery efficiency
+
+For the battery-powered cost/efficiency demo, Mode 1 is implemented in the deep-sleep
+flavour. It quantifies the saving from a **real, device-measured duty cycle** rather
+than asserting a number.
+
+**Pieces (all in this repo):**
+- `xiao/detector_deepsleep/detector_deepsleep.ino` — wakes on PIR (GPIO2 `ext0`), runs
+  FOMO + serves `/status`+`/capture` while awake, deep-sleeps after `AWAKE_HOLD_MS`
+  (15 s) of no motion. Accumulates AWAKE µs and TOTAL elapsed µs in **RTC memory**
+  (survives deep sleep; total elapsed rides the RTC clock via `gettimeofday`) and POSTs
+  them to the backend on each `wake`/`sleep`.
+- `server.py` — `POST /xiao/push` stores the telemetry; `GET /xiao/power` projects
+  `avg_current`, battery life (deep-sleep vs always-on), energy-saved %, and annual
+  service cost. Override assumptions live with `?battery=<mAh>&active=<mA>`.
+- `SmartShelfDashboard.jsx` — **Power & Savings** panel on the Dashboard polls
+  `/xiao/power` every 2 s. It reads from the *backend*, so it stays live (showing
+  💤 DEEP SLEEP / ⚡ AWAKE) even while the device itself is asleep and unreachable.
+
+**Nominal current figures** (datasheet/typical XIAO ESP32-S3 Sense, set in `server.py`):
+`I_ACTIVE_MA = 150` (camera+WiFi+inference), `I_SLEEP_MA = 0.014` (~14 µA deep sleep).
+Replace with bench-measured values for a bulletproof number.
+
+**Before running the demo:**
+1. Flash `detector_deepsleep.ino` (set `ssid`/`password` and `BACKEND_URL` to your PC's
+   LAN IP, e.g. `http://192.168.0.100:5000/xiao/push`).
+2. Wire AM312 OUT → D1/GPIO2 (VCC→3V3, GND→GND).
+3. `python server.py` + `npm run dev`, open the Dashboard, wave at the PIR to wake it.
+
+> The headline: on a 1000 mAh cell, always-on dies in hours (servicing it ~daily is
+> infeasible), while deep-sleep at a realistic low duty lasts days — a >90% energy cut.
+
+---
+
+*Status: Mode 1 deep-sleep demo implemented. Mode 2 (gate counting) and Combined = future TODO.*

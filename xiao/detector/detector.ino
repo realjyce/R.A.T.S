@@ -21,6 +21,7 @@
 #include "esp_camera.h"
 #include <WiFi.h>
 #include <WebServer.h>
+#include <HTTPClient.h>
 
 // Give the Arduino loop task a bigger stack — run_classifier (TFLite Micro)
 // needs more than the default 8 KB. Must be at global scope.
@@ -32,6 +33,11 @@ SET_LOOP_TASK_STACK_SIZE(16 * 1024);
 /* WiFi credentials -------------------------------------------------------- */
 const char* ssid     = "SK_06D0_2.4G";
 const char* password = "AAB2F@2515";
+
+// Backend hub (PC running server.py). The device runs FOMO locally and POSTs
+// its counts here — but only when they CHANGE, so the network stays quiet
+// (edge intelligence). Set to your PC's LAN IP.
+const char* SERVER_INGEST = "http://192.168.0.100:5000/edge/ingest";
 
 WebServer server(80);
 
@@ -191,6 +197,40 @@ static int ei_camera_get_data(size_t offset, size_t length, float* out_ptr) {
 }
 
 /* ------------------------------------------------------------------------ */
+/* Push counts to the backend hub — ONLY when they change (edge intelligence) */
+/* ------------------------------------------------------------------------ */
+static int  last_pushed[MAX_CLASSES] = {0};
+static bool pushed_once = false;
+
+void push_counts_to_server() {
+  if (WiFi.status() != WL_CONNECTED) return;
+  bool changed = !pushed_once;
+  for (int c = 0; c < MAX_CLASSES; c++)
+    if (latest_count[c] != last_pushed[c]) changed = true;
+  if (!changed) return;                        // nothing changed → stay silent
+
+  String body = "{\"device_id\":\"xiao\",\"latency\":" + String(latest_latency_ms) +
+                ",\"objects\":" + String(latest_total_objects) + ",\"counts\":{";
+  for (uint16_t c = 0; c < EI_CLASSIFIER_LABEL_COUNT && c < MAX_CLASSES; c++) {
+    if (c) body += ",";
+    body += "\""; body += ei_classifier_inferencing_categories[c];
+    body += "\":" + String(latest_count[c]);
+  }
+  body += "}}";
+
+  HTTPClient http;
+  http.begin(SERVER_INGEST);
+  http.addHeader("Content-Type", "application/json");
+  int code = http.POST(body);
+  http.end();
+  if (code > 0) {
+    for (int c = 0; c < MAX_CLASSES; c++) last_pushed[c] = latest_count[c];
+    pushed_once = true;
+  }
+  Serial.printf("push counts -> %d\n", code);
+}
+
+/* ------------------------------------------------------------------------ */
 /* Inference                                                                 */
 /* ------------------------------------------------------------------------ */
 void run_inference() {
@@ -258,6 +298,8 @@ void run_inference() {
   latest_latency_ms = result.timing.dsp + result.timing.classification;
 
   Serial.printf("objects: %d  | %ums\n", total, latest_latency_ms);
+
+  push_counts_to_server();   // realtime → backend, only if counts changed
 
   free(snapshot_buf);
   snapshot_buf = nullptr;
