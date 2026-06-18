@@ -24,20 +24,24 @@ Four layers, loosely coupled by HTTP:
 
 1. **Edge hardware** — XIAO ESP32-S3 + PIR AM312. Runs FOMO MobileNetV2 on-device, broadcasts a Wi-Fi AP at `192.168.4.1` exposing `/stream` (MJPEG) and `/status` (JSON `{counts, latency}`). Firmware is **not** in this repo.
 2. **Model training** — artifacts only, in `baseline/` (YOLOv8 training curves, confusion matrix, `args.yaml`). Checkpoints `best.pt`/`last.pt` live in `model/` and are loaded by the backend.
-3. **Backend** (`server.py`) — Flask + Ultralytics YOLO. Three endpoints:
-   - `POST /detect` — accepts `{image: "data:image/jpeg;base64,..."}`, returns `{detections, counts, latency}`. Frame is decoded via base64 → OpenCV.
-   - `GET /health` — model class list.
-   - `GET /metrics` — reads `train_results`/`train_args` directly from the `.pt` checkpoint (uses `torch.load(..., weights_only=False)`). Powers the History page charts.
-4. **Frontend** (`src/SmartShelfDashboard.jsx`) — single-file React app. Everything (dashboard, workflow page, history page, charts, theme) lives in this one ~700-line file. `src/main.jsx` is just the mount point.
+3. **Backend** (`server.py`) — Flask + Ultralytics YOLO. Serves **two independent shelves** via a shared `Shelf` class (state + alert engine + SSE pub/sub), instantiated as `shelf1` (XIAO/FOMO) and `shelf2` (phone/YOLO):
+   - `POST /edge/ingest` — Shelf 1. The XIAO runs FOMO on-device and POSTs `{counts, latency, device_id}`.
+   - `POST /shelf2/ingest` — Shelf 2. Generic count push (e.g. a phone running YOLO locally).
+   - `POST /detect` — accepts `{image: "data:..."}`, runs YOLO server-side, feeds Shelf 2.
+   - `POST /phone_start|/phone_stop`, `GET /phone_stream` (MJPEG re-emit), `GET /phone_counts` (YOLO on latest frame → Shelf 2). The backend is the single consumer of the phone's MJPEG (IP Webcam `/video`, DroidCam `/mjpegfeed`) via the `MjpegProxy` class. The `xiao*` routes are the same pattern for Shelf 1's camera.
+   - `GET /edge/stream`, `GET /shelf2/stream` — per-shelf SSE (`state` + `alert` events). `GET /edge/state`, `GET /shelf2/state` are REST fallbacks.
+   - `GET /xiao/power`, `POST /xiao/push` — Shelf 1 deep-sleep power model.
+   - `GET /health` — model class list. `GET /metrics` — training curves from the `.pt` checkpoint.
+4. **Frontend** (`src/SmartShelfDashboard.jsx`) — single-file React app. Dashboard, workflow page, history page, charts, theme all live here. `src/main.jsx` is the mount point.
 
-### Frontend mode switching
+### Two-shelf dashboard
 
-The dashboard has two camera sources that drive different code paths — keep them straight when editing:
+The dashboard renders both shelves side by side, each fed by its own SSE source via `useShelfStream(url, onAlert)`:
 
-- **`xiao` mode**: `<video>.src = xiaoUrl` (MJPEG), polls `${base}/status` every 2s via `pollStocks`. No bounding-box overlay (the device returns pre-counted results, not boxes).
-- **`webcam` mode**: `getUserMedia` → hidden `captureRef` canvas snapshots a frame every 2s → POSTs base64 JPEG to `/detect` → `drawBoxes` paints YOLO results onto `canvasRef` overlay.
+- **Shelf 1** (`/edge/stream`): `EdgeNodePanel` — the XIAO infers on-device and pushes counts; no live video, just telemetry. Drives the History log directly from SSE readings.
+- **Shelf 2** (`/shelf2/stream`): `PhoneShelfPanel` — user pastes a phone stream URL → `/phone_start` → `<img src="/phone_stream">` shows the MJPEG, and a 1.5s poll of `/phone_counts` runs YOLO server-side, draws center-point dots on an overlay canvas, and logs to History via `onInference`.
 
-Switching `camSource` triggers `stopCamera` via effect — both intervals and media streams must be torn down to avoid leaks.
+`AggregatePanel` sums counts across both shelves; `LiveAlertsFeed` merges both alert streams (alert IDs are per-shelf, so merged entries get a `uid` like `s1-3`).
 
 ### Class coupling
 

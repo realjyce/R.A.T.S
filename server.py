@@ -1,6 +1,8 @@
 """
-R.A.T.S  –  Detection backend
-Loads model/best.pt and exposes POST /detect
+R.A.T.S  –  Detection backend (two-shelf aggregator)
+Loads model/best.pt and serves two independent shelves:
+  • Shelf 1 — XIAO ESP32-S3 + PIR + FOMO (on-device inference, pushes counts)
+  • Shelf 2 — Phone camera (IP Webcam / DroidCam) + YOLO (server-side inference)
 Run:  python server.py
 """
 
@@ -33,13 +35,10 @@ model = YOLO(MODEL_PATH)
 _power = {"event": None, "boot_count": 0, "awake_us": 0, "total_us": 0,
           "counts": {}, "ts": 0.0}
 
-# Map model class names → dashboard product IDs
-CLASS_MAP = {name: name for name in model.names.values()}
-
 # ── Edge alert engine ────────────────────────────────────────────────────────
-# The edge device (or webcam) feeds counts here; the server is the single source
-# of truth. An ALERT is raised only on a status TRANSITION (ok→low→empty, or a
-# restock back to ok) — i.e. "only sent when necessary", not every frame.
+# Each shelf is the single source of truth for its own stock. An ALERT is raised
+# only on a status TRANSITION (ok→low→empty, or a restock back to ok) — i.e.
+# "only sent when necessary", not every frame.
 LOW_THRESHOLD = 3            # ≤ this (and > 0) is "low"; 0 is "empty"
 
 def status_of(count):
@@ -53,63 +52,91 @@ def alert_message(product, st, count):
     if st == "low":   return f"{label} running low — {count} left"
     return f"{label} restocked — {count} in stock"
 
-_edge = {                    # latest world state, served to every new subscriber
-    "counts": {}, "statuses": {}, "latency": 0, "objects": 0,
-    "source": None, "device_id": None, "ts": 0.0,
-}
-_alerts       = []                       # most-recent-first, capped
-_prev_status  = {}                       # per-product last status, for transitions
-_alert_seq    = itertools.count(1)
-_edge_lock    = threading.Lock()
 
-# SSE pub/sub: one bounded queue per connected browser.
-_subscribers  = []
-_sub_lock     = threading.Lock()
+class Shelf:
+    """One shelf's world state + alert engine + SSE pub/sub.
 
-def _publish(event, data):
-    dead = []
-    with _sub_lock:
-        for q in _subscribers:
-            try:
-                q.put_nowait((event, data))
-            except queue.Full:
-                dead.append(q)
-        for q in dead:
-            _subscribers.remove(q)
+    Both pipelines normalize into the same shape: a per-product count map plus
+    derived statuses. Alerts fire only on status transitions, and every SSE
+    subscriber gets the current snapshot immediately on connect — so the
+    dashboard stays live even while a deep-sleep device is offline.
+    """
+    def __init__(self, shelf_id):
+        self.shelf_id    = shelf_id
+        self._state      = {"counts": {}, "statuses": {}, "latency": 0,
+                            "objects": 0, "source": None, "device_id": None, "ts": 0.0}
+        self._alerts     = []                 # most-recent-first, capped
+        self._prev       = {}                 # per-product last status, for transitions
+        self._seq        = itertools.count(1)
+        self._lock       = threading.Lock()
+        self._subs       = []                 # one bounded queue per browser
+        self._sub_lock   = threading.Lock()
 
-def _snapshot():
-    return {**_edge, "alerts": _alerts[:20]}
+    # ── SSE pub/sub ──────────────────────────────────────────────────────────
+    def subscribe(self):
+        q = queue.Queue(maxsize=128)
+        with self._sub_lock:
+            self._subs.append(q)
+        return q
 
-def ingest_counts(counts, source, latency=0, device_id=None):
-    """Update world state from a reading and raise alerts on status changes."""
-    counts = {k: int(v) for k, v in counts.items()}
-    statuses, fresh = {}, []
-    with _edge_lock:
-        for prod, cnt in counts.items():
-            st = status_of(cnt)
-            statuses[prod] = st
-            prev = _prev_status.get(prod)
-            # Skip the first reading (baseline) so startup doesn't alert-storm.
-            if prev is not None and st != prev and (
-                st in ("low", "empty") or (st == "ok" and prev in ("low", "empty"))
-            ):
-                fresh.append({
-                    "id": next(_alert_seq), "ts": time.time(), "product": prod,
-                    "status": st, "count": cnt, "severity": SEVERITY[st],
-                    "message": alert_message(prod, st, cnt),
-                })
-            _prev_status[prod] = st
-        _edge.update({"counts": counts, "statuses": statuses, "latency": int(latency),
-                      "objects": sum(counts.values()), "source": source,
-                      "device_id": device_id, "ts": time.time()})
+    def unsubscribe(self, q):
+        with self._sub_lock:
+            if q in self._subs:
+                self._subs.remove(q)
+
+    def _publish(self, event, data):
+        dead = []
+        with self._sub_lock:
+            for q in self._subs:
+                try:
+                    q.put_nowait((event, data))
+                except queue.Full:
+                    dead.append(q)
+            for q in dead:
+                self._subs.remove(q)
+
+    def snapshot(self):
+        with self._lock:
+            return {**self._state, "shelf_id": self.shelf_id, "alerts": self._alerts[:20]}
+
+    # ── Ingestion ────────────────────────────────────────────────────────────
+    def ingest(self, counts, source, latency=0, device_id=None):
+        """Update world state from a reading and raise alerts on status changes."""
+        counts = {k: int(v) for k, v in counts.items()}
+        statuses, fresh = {}, []
+        with self._lock:
+            for prod, cnt in counts.items():
+                st = status_of(cnt)
+                statuses[prod] = st
+                prev = self._prev.get(prod)
+                # Skip the first reading (baseline) so startup doesn't alert-storm.
+                if prev is not None and st != prev and (
+                    st in ("low", "empty") or (st == "ok" and prev in ("low", "empty"))
+                ):
+                    fresh.append({
+                        "id": next(self._seq), "ts": time.time(), "product": prod,
+                        "status": st, "count": cnt, "severity": SEVERITY[st],
+                        "message": alert_message(prod, st, cnt),
+                    })
+                self._prev[prod] = st
+            self._state.update({"counts": counts, "statuses": statuses,
+                                "latency": int(latency), "objects": sum(counts.values()),
+                                "source": source, "device_id": device_id, "ts": time.time()})
+            for a in fresh:
+                self._alerts.insert(0, a)
+            del self._alerts[50:]
+            snap = {**self._state, "shelf_id": self.shelf_id, "alerts": self._alerts[:20]}
+        self._publish("state", snap)
         for a in fresh:
-            _alerts.insert(0, a)
-        del _alerts[50:]
-        snap = _snapshot()
-    _publish("state", snap)
-    for a in fresh:
-        _publish("alert", a)
-    return statuses
+            self._publish("alert", a)
+        return statuses
+
+
+# The two shelves of the unified dashboard.
+shelf1 = Shelf("shelf_1")   # XIAO ESP32 + FOMO   (counts pushed by the device)
+shelf2 = Shelf("shelf_2")   # Phone camera + YOLO (inference here on the server)
+SHELVES = {"shelf_1": shelf1, "shelf_2": shelf2}
+
 
 def run_inference(img):
     """Run YOLO on a decoded BGR frame → {detections, counts, latency}."""
@@ -128,16 +155,18 @@ def run_inference(img):
         counts[label] += 1
         detections.append({
             "x1": x1, "y1": y1, "x2": x2, "y2": y2,
-            "cx": (x1 + x2) / 2,
-            "cy": (y1 + y2) / 2,
+            "cx": (x1 + x2) / 2,    # FOMO emits center points; we hand YOLO's
+            "cy": (y1 + y2) / 2,    # box centers too, so both render identically
             "conf":  round(conf, 3),
             "label": label,
         })
 
     return {"detections": detections, "counts": counts, "latency": latency}
 
+
 @app.route("/detect", methods=["POST"])
 def detect():
+    """Webcam/phone snapshot → YOLO → shelf 2. Body: {image: "data:image/jpeg;base64,..."}."""
     data = request.get_json(force=True)
     if not data or "image" not in data:
         return jsonify({"error": "No image provided"}), 400
@@ -152,18 +181,19 @@ def detect():
         return jsonify({"error": "Invalid image"}), 400
 
     result = run_inference(img)
-    # Feed the alert engine so the realtime dashboard + alerts work from webcam too.
-    ingest_counts(result["counts"], "webcam", result["latency"])
+    # Feed shelf 2's alert engine so the realtime dashboard + alerts work here too.
+    shelf2.ingest(result["counts"], data.get("source", "phone_yolo"), result["latency"])
     return jsonify(result)
 
-class XiaoStream:
-    """Single client of a XIAO device's /stream.
 
-    The device's web server is single-threaded — if the browser opens /stream
-    it blocks /capture (detection), and vice-versa. So the backend becomes the
-    ONE consumer: it holds the MJPEG connection, keeps the latest frame, and
-    both re-streams it to the browser (/xiao_stream) and runs YOLO on it
-    (/xiao_counts). The device only ever sees one connection → no conflict.
+class MjpegProxy:
+    """Single backend consumer of a device's MJPEG /stream.
+
+    Many device web servers are single-threaded — if the browser opens the
+    stream it blocks inference, and vice-versa. So the backend becomes the ONE
+    consumer: it holds the MJPEG connection, keeps the latest frame, and both
+    re-streams it to the browser and runs YOLO on it. The device only ever sees
+    one connection → no conflict. Used for both the XIAO and the phone camera.
     """
     def __init__(self):
         self.url      = None
@@ -222,19 +252,59 @@ class XiaoStream:
             except requests.RequestException:
                 time.sleep(0.5)  # device hiccup — retry the connection
 
-xiao = XiaoStream()
 
-def _stream_url(raw):
-    """Normalize any device URL to its /stream endpoint."""
+def _mjpeg_response(proxy):
+    """Re-emit a proxy's device frames to the browser as a smooth MJPEG stream."""
+    def gen():
+        last = -1
+        while True:
+            if not proxy.running:
+                break
+            frame, seq = proxy.snapshot()
+            if frame is not None and seq != last:
+                last = seq
+                yield (b"--frame\r\nContent-Type: image/jpeg\r\n"
+                       b"Content-Length: " + str(len(frame)).encode() + b"\r\n\r\n"
+                       + frame + b"\r\n")
+            else:
+                time.sleep(0.02)
+    return Response(gen(), mimetype="multipart/x-mixed-replace; boundary=frame")
+
+
+def _proxy_counts(proxy, shelf, source):
+    """Run YOLO on a proxy's latest frame → {detections, counts, latency, w, h}."""
+    frame, _ = proxy.snapshot()
+    if frame is None:
+        return jsonify({"error": "No frame yet — is the stream started?"}), 503
+    nparr = np.frombuffer(frame, np.uint8)
+    img   = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    if img is None:
+        return jsonify({"error": "Invalid frame from device"}), 502
+    result = run_inference(img)
+    h, w   = img.shape[:2]
+    result["w"], result["h"] = w, h
+    shelf.ingest(result["counts"], source, result["latency"])
+    return jsonify(result)
+
+
+xiao  = MjpegProxy()   # Shelf 1 camera (XIAO MJPEG, when streaming frames)
+phone = MjpegProxy()   # Shelf 2 camera (IP Webcam / DroidCam)
+
+
+def _stream_url(raw, default_path="/stream"):
+    """Normalize a device URL. If the user already gave a path, keep it
+    (IP Webcam uses /video, DroidCam /mjpegfeed); otherwise append a default."""
     p = urlparse((raw or "").strip())
     if not p.scheme or not p.netloc:
         return None
-    return f"{p.scheme}://{p.netloc}/stream"
+    path = p.path if p.path and p.path != "/" else default_path
+    return f"{p.scheme}://{p.netloc}{path}"
 
+
+# ── Shelf 1: XIAO camera MJPEG proxy (optional video demo) ───────────────────
 @app.route("/xiao_start", methods=["POST"])
 def xiao_start():
-    """Begin proxying a device's MJPEG stream. Body: {"url": "http://<ip>/stream"}."""
-    url = _stream_url((request.get_json(force=True) or {}).get("url"))
+    url = _stream_url((request.get_json(force=True) or {}).get("url"), "/stream")
     if not url:
         return jsonify({"error": "Invalid url"}), 400
     xiao.start(url)
@@ -247,38 +317,39 @@ def xiao_stop():
 
 @app.route("/xiao_stream")
 def xiao_stream():
-    """Re-emit the device frames to the browser as a smooth MJPEG stream."""
-    def gen():
-        last = -1
-        while True:
-            if not xiao.running:
-                break
-            frame, seq = xiao.snapshot()
-            if frame is not None and seq != last:
-                last = seq
-                yield (b"--frame\r\nContent-Type: image/jpeg\r\n"
-                       b"Content-Length: " + str(len(frame)).encode() + b"\r\n\r\n"
-                       + frame + b"\r\n")
-            else:
-                time.sleep(0.02)
-    return Response(gen(), mimetype="multipart/x-mixed-replace; boundary=frame")
+    return _mjpeg_response(xiao)
 
 @app.route("/xiao_counts")
 def xiao_counts():
-    """Run YOLO on the latest streamed frame → {detections, counts, latency, w, h}."""
-    frame, _ = xiao.snapshot()
-    if frame is None:
-        return jsonify({"error": "No frame yet — is the stream started?"}), 503
-    nparr = np.frombuffer(frame, np.uint8)
-    img   = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-    if img is None:
-        return jsonify({"error": "Invalid frame from device"}), 502
-    result = run_inference(img)
-    h, w   = img.shape[:2]
-    result["w"], result["h"] = w, h
-    ingest_counts(result["counts"], "xiao-proxy", result["latency"])
-    return jsonify(result)
+    return _proxy_counts(xiao, shelf1, "xiao-proxy")
 
+
+# ── Shelf 2: phone camera MJPEG proxy (IP Webcam / DroidCam) ─────────────────
+@app.route("/phone_start", methods=["POST"])
+def phone_start():
+    """Begin proxying a phone's MJPEG stream. Body: {"url": "http://<ip>:8080/video"}.
+    IP Webcam → /video, DroidCam → /mjpegfeed. A bare host defaults to /video."""
+    url = _stream_url((request.get_json(force=True) or {}).get("url"), "/video")
+    if not url:
+        return jsonify({"error": "Invalid url"}), 400
+    phone.start(url)
+    return jsonify({"status": "started", "url": url})
+
+@app.route("/phone_stop", methods=["POST"])
+def phone_stop():
+    phone.stop()
+    return jsonify({"status": "stopped"})
+
+@app.route("/phone_stream")
+def phone_stream():
+    return _mjpeg_response(phone)
+
+@app.route("/phone_counts")
+def phone_counts():
+    return _proxy_counts(phone, shelf2, "phone_yolo")
+
+
+# ── Power telemetry (Shelf 1 / XIAO deep-sleep demo) ─────────────────────────
 @app.route("/xiao/push", methods=["POST"])
 def xiao_push():
     """Deep-sleep device telemetry. The device POSTs this on each wake ('wake')
@@ -337,50 +408,69 @@ def xiao_power():
         "cost_per_service":        COST_PER_SERVICE,
     })
 
+
+# ── Per-shelf ingest + SSE streams ───────────────────────────────────────────
 @app.route("/edge/ingest", methods=["POST"])
 def edge_ingest():
-    """Realtime push from the XIAO edge device. It runs FOMO locally and POSTs
-    its counts here (ideally only when they change). Body:
+    """Realtime push from the XIAO edge device (Shelf 1). It runs FOMO locally
+    and POSTs its counts here (ideally only when they change). Body:
     {device_id?, counts:{bottle:N,...}, latency?, objects?}."""
     d = request.get_json(force=True) or {}
     counts = d.get("counts") or {}
     if not isinstance(counts, dict):
         return jsonify({"error": "counts must be an object"}), 400
-    statuses = ingest_counts(counts, d.get("device_id", "xiao"),
+    statuses = shelf1.ingest(counts, d.get("device_id", "xiao"),
+                             d.get("latency", 0), d.get("device_id"))
+    return jsonify({"ok": True, "statuses": statuses})
+
+@app.route("/shelf2/ingest", methods=["POST"])
+def shelf2_ingest():
+    """Generic ingest for Shelf 2 — e.g. a phone running YOLO locally and
+    POSTing counts directly. Same schema as /edge/ingest."""
+    d = request.get_json(force=True) or {}
+    counts = d.get("counts") or {}
+    if not isinstance(counts, dict):
+        return jsonify({"error": "counts must be an object"}), 400
+    statuses = shelf2.ingest(counts, d.get("device_id", "phone_yolo"),
                              d.get("latency", 0), d.get("device_id"))
     return jsonify({"ok": True, "statuses": statuses})
 
 @app.route("/edge/state")
 def edge_state():
-    """REST snapshot of the current world state + recent alerts (SSE fallback)."""
-    with _edge_lock:
-        return jsonify(_snapshot())
+    """REST snapshot of Shelf 1's world state + recent alerts (SSE fallback)."""
+    return jsonify(shelf1.snapshot())
 
-@app.route("/edge/stream")
-def edge_stream_sse():
-    """Server-Sent Events: pushes 'state' and 'alert' events to the dashboard in
-    realtime. Every subscriber gets the current snapshot immediately on connect."""
+@app.route("/shelf2/state")
+def shelf2_state():
+    return jsonify(shelf2.snapshot())
+
+def _sse(shelf):
+    """Server-Sent Events for one shelf: pushes 'state' and 'alert' events to the
+    dashboard in realtime. Every subscriber gets the current snapshot on connect."""
     def gen():
-        q = queue.Queue(maxsize=128)
-        with _sub_lock:
-            _subscribers.append(q)
+        q = shelf.subscribe()
         try:
-            with _edge_lock:
-                snap = _snapshot()
-            yield f"event: state\ndata: {json.dumps(snap)}\n\n"
+            yield f"event: state\ndata: {json.dumps(shelf.snapshot())}\n\n"
             while True:
                 try:
                     event, data = q.get(timeout=15)
                     yield f"event: {event}\ndata: {json.dumps(data)}\n\n"
                 except queue.Empty:
-                    yield ": keepalive\n\n"      # comment frame keeps the connection open
+                    yield ": keepalive\n\n"      # comment frame keeps connection open
         finally:
-            with _sub_lock:
-                if q in _subscribers:
-                    _subscribers.remove(q)
+            shelf.unsubscribe(q)
     return Response(gen(), mimetype="text/event-stream",
                     headers={"Cache-Control": "no-cache",
                              "X-Accel-Buffering": "no", "Connection": "keep-alive"})
+
+@app.route("/edge/stream")
+def edge_stream_sse():
+    return _sse(shelf1)
+
+@app.route("/shelf2/stream")
+def shelf2_stream_sse():
+    return _sse(shelf2)
+
 
 @app.route("/health")
 def health():

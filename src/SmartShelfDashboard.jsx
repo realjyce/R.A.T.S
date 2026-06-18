@@ -167,11 +167,11 @@ function statusOf(count) {
   return count == null ? "idle" : count <= 0 ? "empty" : count <= 3 ? "low" : "ok";
 }
 
-// ── Realtime edge feed: Server-Sent Events from the backend hub ───────────────
-// The device infers on-device and pushes counts; the server raises alerts on
-// status transitions and streams everything here. Survives device sleep because
-// the server retains the last state.
-function useEdgeStream(onAlert) {
+// ── Realtime shelf feed: Server-Sent Events from one shelf's backend hub ──────
+// Each shelf pushes counts (FOMO on-device for shelf 1, YOLO on the server for
+// shelf 2); the server raises alerts on status transitions and streams them
+// here. Survives device sleep because the server retains the last state.
+function useShelfStream(url, onAlert) {
   const [state, setState] = useState({
     counts: {}, statuses: {}, latency: 0, objects: 0, source: null, ts: 0, connected: false,
   });
@@ -180,7 +180,7 @@ function useEdgeStream(onAlert) {
   onAlertRef.current = onAlert;
 
   useEffect(() => {
-    const es = new EventSource("/edge/stream");
+    const es = new EventSource(url);
     es.addEventListener("state", (e) => {
       const d = JSON.parse(e.data);
       setState((s) => ({
@@ -198,7 +198,7 @@ function useEdgeStream(onAlert) {
     es.onopen  = () => setState((s) => ({ ...s, connected: true }));
     es.onerror = () => setState((s) => ({ ...s, connected: false }));
     return () => es.close();
-  }, []);
+  }, [url]);
 
   return { ...state, alerts };
 }
@@ -355,12 +355,13 @@ function LiveAlertsFeed({ t, alerts }) {
             {shown.map((a, i) => {
               const sev = SEV[a.severity] || SEV.info;
               return (
-                <div key={a.id} style={{ display: "flex", alignItems: "center", gap: 13, padding: "12px 18px",
+                <div key={a.uid || a.id} style={{ display: "flex", alignItems: "center", gap: 13, padding: "12px 18px",
                   borderBottom: i < shown.length - 1 ? `1px solid ${border}55` : "none" }}>
                   <span style={{ display: "grid", placeItems: "center", width: 26, height: 26, borderRadius: 7, background: `${sev.color}1A`, flexShrink: 0 }}>
                     <Icon name={sev.icon} size={14} color={sev.color} />
                   </span>
                   <span style={{ flex: 1, fontSize: 12.5, color: textPrimary, fontWeight: 600 }}>{a.message}</span>
+                  {a.shelf && <span style={{ fontSize: 9.5, fontWeight: 700, color: textSecondary, padding: "2px 7px", borderRadius: 5, border: `1px solid ${border}`, whiteSpace: "nowrap" }}>{a.shelf}</span>}
                   <span style={{ fontSize: 9.5, fontWeight: 700, color: sev.color, textTransform: "uppercase", letterSpacing: ".06em" }}>{a.severity}</span>
                   <span style={{ fontSize: 10.5, color: textSecondary, minWidth: 64, textAlign: "right", fontFamily: FONT_MONO }}>{formatTime(new Date((a.ts || 0) * 1000))}</span>
                 </div>
@@ -368,6 +369,211 @@ function LiveAlertsFeed({ t, alerts }) {
             })}
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+// ── Product stock grid for ONE shelf ─────────────────────────────────────────
+// Renders the per-class counts + low/empty alert styling. Driven entirely by a
+// shelf's {counts, statuses}, so both shelves share identical markup.
+function ProductStock({ t, stocks, statuses, compact = false }) {
+  const { surfaceAlt, border, textPrimary, textSecondary, accent, alertRed, green } = t;
+  return (
+    <div className="rats-stagger" style={{ display: "grid", gridTemplateColumns: "1fr", gap: 10 }}>
+      {PRODUCTS.map((p) => {
+        const count  = stocks ? (stocks[p.id] ?? 0) : null;
+        const status = statuses?.[p.id] || statusOf(count);
+        const alertYellow = "#F4B740";
+        const isAlert     = status === "empty" || status === "low";
+        const alertColor  = status === "empty" ? alertRed : alertYellow;
+        const statusColor = { idle: textSecondary, empty: alertRed, low: alertYellow, ok: green }[status] || textSecondary;
+        const dotColor    = isAlert ? alertColor : p.color;
+        return (
+          <div key={p.id} className="rats-card" style={{ background: isAlert ? (status === "empty" ? alertRed + "0C" : alertYellow + "0A") : surfaceAlt, border: `1px solid ${isAlert ? alertColor + "55" : border}`, borderRadius: 12, padding: compact ? "11px 13px" : "16px 18px", ...(isAlert ? { boxShadow: `0 0 0 1px ${alertColor}2E, 0 12px 30px -16px ${alertColor}66` } : {}) }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 11 }}>
+              <span style={{ display: "grid", placeItems: "center", width: 34, height: 34, borderRadius: 9, background: `${dotColor}14`, border: `1px solid ${dotColor}30`, flexShrink: 0 }}>
+                <Icon name={p.icon} size={18} color={dotColor} strokeWidth={1.6} />
+              </span>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontWeight: 600, fontSize: 13, color: textPrimary }}>{p.label}</div>
+                <div style={{ fontSize: 9.5, color: statusColor, fontWeight: 700, marginTop: 1, letterSpacing: ".05em", textTransform: "uppercase" }}>{{ idle: "No data", empty: "Out of stock", low: "Low stock", ok: "In stock" }[status]}</div>
+              </div>
+              <AnimatedNumber value={count} style={{ fontSize: 30, fontWeight: 700, color: count == null ? textSecondary : statusColor, lineHeight: 1 }} />
+              {isAlert && <span className="rats-blink" style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 8.5, fontWeight: 700, padding: "3px 7px", borderRadius: 6, background: alertColor + "1F", color: alertColor, border: `1px solid ${alertColor}40`, letterSpacing: ".04em" }}><Icon name="alert" size={10} color={alertColor} /> {status === "empty" ? "CRITICAL" : "LOW"}</span>}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ── One shelf column: titled card (camera/edge viewport) + its product stock ──
+function ShelfColumn({ t, title, subtitle, accentColor, shelf, liveLabel, viewport }) {
+  const { surfaceAlt, border, textPrimary, textSecondary, alertRed, green } = t;
+  const live = shelf.ts > 0 && shelf.connected;
+  const stocks = shelf.ts > 0 ? shelf.counts : null;
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      <div className="rats-card" style={{ background: surfaceAlt, border: `1px solid ${border}`, borderTop: `3px solid ${accentColor}`, borderRadius: 12, overflow: "hidden" }}>
+        {/* Title bar */}
+        <div style={{ padding: "11px 16px", borderBottom: `1px solid ${border}`, display: "flex", alignItems: "center", gap: 12 }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 14, fontWeight: 700, color: textPrimary }}>
+              <span style={{ width: 9, height: 9, borderRadius: 3, background: accentColor, flexShrink: 0 }} /> {title}
+            </div>
+            <div style={{ fontSize: 10.5, color: textSecondary, marginTop: 2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{subtitle}</div>
+          </div>
+          <span style={{ display: "flex", alignItems: "center", gap: 6, color: live ? alertRed : textSecondary, fontWeight: 700, fontSize: 10, whiteSpace: "nowrap", letterSpacing: ".06em", fontFamily: FONT_MONO }}>
+            {live && <span className="rats-blink" style={{ width: 7, height: 7, borderRadius: "50%", background: alertRed, display: "inline-block" }} />}
+            {liveLabel}
+          </span>
+        </div>
+        {viewport}
+      </div>
+      <ProductStock t={t} stocks={stocks} statuses={shelf.statuses} compact />
+    </div>
+  );
+}
+
+// ── Shelf 2 viewport: phone camera (IP Webcam / DroidCam) proxied by the backend.
+//    The backend holds the single MJPEG connection, re-streams it to /phone_stream,
+//    and runs YOLO on /phone_counts. We poll counts to draw center-point dots and
+//    feed the History log; stock + alerts arrive separately via the shelf-2 SSE. ─
+function PhoneShelfPanel({ t, onInference }) {
+  const { bg, surfaceAlt, border, textPrimary, textSecondary, accent, alertRed, camBg } = t;
+  const [url, setUrl]       = useState("");
+  const [phase, setPhase]   = useState("idle");   // idle | starting | active | error
+  const [err, setErr]       = useState("");
+  const imgRef    = useRef(null);
+  const canvasRef = useRef(null);
+  const pollRef   = useRef(null);
+  const onInfRef  = useRef(onInference);
+  onInfRef.current = onInference;
+
+  const drawDots = useCallback((detections, vw, vh) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    canvas.width = vw; canvas.height = vh;
+    const ctx = canvas.getContext("2d");
+    ctx.clearRect(0, 0, vw, vh);
+    const COLORS = { bottle: "#38BDF8", snack: "#F97316", cup: "#22C55E" };
+    detections.forEach(({ cx, cy, label }) => {
+      ctx.beginPath();
+      ctx.arc(cx, cy, 7, 0, Math.PI * 2);
+      ctx.fillStyle = COLORS[label] ?? "#FFFFFF";
+      ctx.fill();
+      ctx.lineWidth = 1.5;
+      ctx.strokeStyle = "rgba(0,0,0,0.5)";
+      ctx.stroke();
+    });
+  }, []);
+
+  const poll = useCallback(async () => {
+    try {
+      const res  = await fetch("/phone_counts");
+      if (!res.ok) return;
+      const data = await res.json();
+      if (!data.detections) return;
+      drawDots(data.detections, data.w || 640, data.h || 480);
+      onInfRef.current?.(data);
+    } catch { /* backend hiccup — keep polling */ }
+  }, [drawDots]);
+
+  const start = useCallback(async () => {
+    setPhase("starting"); setErr("");
+    try {
+      const res = await fetch("/phone_start", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url }) });
+      const d   = await res.json();
+      if (!res.ok) throw new Error(d.error || "Could not start stream");
+      if (imgRef.current) imgRef.current.src = `/phone_stream?t=${Date.now()}`;
+      setPhase("active");
+      clearInterval(pollRef.current);
+      pollRef.current = setInterval(poll, 1500);
+    } catch (e) { setPhase("error"); setErr(e.message); }
+  }, [url, poll]);
+
+  const stop = useCallback(() => {
+    clearInterval(pollRef.current);
+    fetch("/phone_stop", { method: "POST" }).catch(() => {});
+    if (imgRef.current) imgRef.current.src = "";
+    if (canvasRef.current) { const c = canvasRef.current; c.getContext("2d").clearRect(0, 0, c.width, c.height); }
+    setPhase("idle");
+  }, []);
+
+  useEffect(() => () => { clearInterval(pollRef.current); fetch("/phone_stop", { method: "POST" }).catch(() => {}); }, []);
+
+  const live = phase === "active";
+  return (
+    <div style={{ background: surfaceAlt }}>
+      {/* URL bar */}
+      <div style={{ padding: "8px 12px", borderBottom: `1px solid ${border}`, display: "flex", alignItems: "center", gap: 8 }}>
+        <Icon name="wifi" size={14} color={textSecondary} />
+        <input
+          value={url} onChange={(e) => setUrl(e.target.value)}
+          placeholder="http://192.168.x.x:8080/video"
+          disabled={live}
+          style={{ flex: 1, minWidth: 0, background: bg, border: `1px solid ${border}`, borderRadius: 7, padding: "6px 10px", color: textPrimary, fontFamily: FONT_MONO, fontSize: 11, outline: "none" }}
+        />
+        {!live
+          ? <button className="rats-btn" onClick={start} disabled={phase === "starting" || !url.trim()} style={{ ...btnStyle(accent, FONT_SANS), opacity: (phase === "starting" || !url.trim()) ? 0.5 : 1, whiteSpace: "nowrap" }}>{phase === "starting" ? "Connecting…" : "Connect"}</button>
+          : <button className="rats-btn" onClick={stop} style={{ ...btnStyle(alertRed, FONT_SANS), whiteSpace: "nowrap" }}>Stop</button>}
+      </div>
+
+      {/* Viewport */}
+      <div style={{ position: "relative", width: "100%", aspectRatio: "16/9", background: camBg, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden" }}>
+        <img ref={imgRef} alt="" onError={() => phase === "active" && setErr("Stream dropped — check the phone URL")} style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "contain", display: live ? "block" : "none" }} />
+        <canvas ref={canvasRef} style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "contain", pointerEvents: "none", display: live ? "block" : "none" }} />
+        {!live && (
+          <div style={{ zIndex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 8, color: textSecondary, fontSize: 12, textAlign: "center", padding: 16 }}>
+            <Icon name="camera" size={28} color={textSecondary} strokeWidth={1.5} />
+            {phase === "error"
+              ? <div style={{ color: alertRed, maxWidth: 240 }}>{err}</div>
+              : <div style={{ maxWidth: 250 }}>Open <strong style={{ color: accent }}>IP Webcam</strong> or <strong style={{ color: accent }}>DroidCam</strong> on your phone, then paste its stream URL above.</div>}
+          </div>
+        )}
+        {live && (
+          <span style={{ position: "absolute", top: 10, left: 12, display: "flex", alignItems: "center", gap: 6, fontSize: 10, fontWeight: 700, color: alertRed, fontFamily: FONT_MONO, letterSpacing: ".06em" }}>
+            <span className="rats-blink" style={{ width: 7, height: 7, borderRadius: "50%", background: alertRed }} /> LIVE · YOLO
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Aggregate panel: combined stock across both shelves ──────────────────────
+function AggregatePanel({ t, shelf1, shelf2 }) {
+  const { surfaceAlt, border, textPrimary, textSecondary, accent, green } = t;
+  const both = [shelf1, shelf2];
+  const totals = PRODUCTS.map((p) => {
+    const total = both.reduce((sum, s) => sum + (s.ts > 0 ? (s.counts?.[p.id] ?? 0) : 0), 0);
+    const seen  = both.some((s) => s.ts > 0);
+    return { ...p, total: seen ? total : null };
+  });
+  const grand = totals.reduce((sum, p) => sum + (p.total ?? 0), 0);
+  return (
+    <div>
+      <SectionLabel color={textSecondary}>Aggregate · Both Shelves Combined</SectionLabel>
+      <div className="rats-card" style={{ background: surfaceAlt, border: `1px solid ${border}`, borderTop: `3px solid ${accent}`, borderRadius: 12, padding: "16px 20px", display: "flex", flexWrap: "wrap", alignItems: "center", gap: 20 }}>
+        <div style={{ display: "flex", flexDirection: "column", paddingRight: 20, borderRight: `1px solid ${border}` }}>
+          <span style={{ fontSize: 10, color: textSecondary, textTransform: "uppercase", letterSpacing: ".06em" }}>Total units</span>
+          <span style={{ fontSize: 34, fontWeight: 800, color: accent, lineHeight: 1.1 }}>{grand}</span>
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(110px, 1fr))", gap: 12, flex: 1 }}>
+          {totals.map((p) => (
+            <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <span style={{ display: "grid", placeItems: "center", width: 32, height: 32, borderRadius: 9, background: `${p.color}14`, border: `1px solid ${p.color}30` }}>
+                <Icon name={p.icon} size={16} color={p.color} />
+              </span>
+              <div>
+                <div style={{ fontSize: 10.5, color: textSecondary }}>{p.label}</div>
+                <div style={{ fontSize: 18, fontWeight: 700, color: textPrimary }}>{p.total ?? "—"}</div>
+              </div>
+            </div>
+          ))}
+        </div>
       </div>
     </div>
   );
@@ -655,119 +861,50 @@ export default function SmartShelfDashboard() {
   const t = dark ? THEMES.dark : THEMES.light;
   const { bg, surface, surfaceAlt, border, textPrimary, textSecondary, accent, alertRed, green } = t;
 
-  const [camSource, setCamSource] = useState("edge"); // "edge" | "webcam"
-  const [camState,  setCamState] = useState("idle"); // webcam only: idle | requesting | active | error
-  const [camError,  setCamError] = useState("");
   const [inferLog, setInferLog] = useState([]);
   const [totalRuns, setTotalRuns] = useState(0);
   const [avgLatency, setAvgLatency] = useState(null);
   const [toasts,    setToasts]   = useState([]);
 
-  const videoRef    = useRef(null);
-  const canvasRef   = useRef(null);   // detection overlay (webcam mode)
-  const captureRef  = useRef(null);   // hidden canvas for frame capture
-  const inferRef    = useRef(null);
-  const latencies   = useRef([]);
-  const streamRef   = useRef(null);
-  const lastLoggedTs = useRef(0);     // de-dupe edge readings into the History log
+  const latencies    = useRef([]);
+  const lastLoggedTs = useRef(0);     // de-dupe shelf-1 readings into the History log
 
-  // ── Realtime alerts: push a toast whenever the server raises one ──────────
+  // ── Realtime alerts: push a toast whenever either shelf raises one ────────
   const pushToast    = useCallback((a) => setToasts((prev) => [...prev, a]), []);
   const dismissToast = useCallback((id) => setToasts((prev) => prev.filter((x) => x.id !== id)), []);
-  const edge = useEdgeStream(pushToast);
 
-  // The server is the single source of truth for stock + statuses.
-  const hasData = edge.ts > 0;
-  const stocks  = hasData ? edge.counts : null;
+  // Two independent shelves, each its own SSE source & single source of truth.
+  const shelf1 = useShelfStream("/edge/stream", pushToast);     // XIAO + FOMO (edge)
+  const shelf2 = useShelfStream("/shelf2/stream", pushToast);   // Phone + YOLO
+  const serverLinked = shelf1.connected || shelf2.connected;    // either SSE up = backend reachable
 
-  // Device-pushed readings (edge mode) drive the History log; webcam logs itself.
+  // Merge both shelves' alert feeds, newest first, for the shared alerts panel.
+  const allAlerts = [...(shelf1.alerts || []).map((a) => ({ ...a, shelf: "Shelf 1", uid: `s1-${a.id}` })),
+                     ...(shelf2.alerts || []).map((a) => ({ ...a, shelf: "Shelf 2", uid: `s2-${a.id}` }))]
+                    .sort((a, b) => (b.ts || 0) - (a.ts || 0));
+
+  // Shelf 1 (device-pushed) readings drive the History log; shelf 2 logs via
+  // the phone-panel inference callback below.
   useEffect(() => {
-    if (!edge.ts || edge.ts === lastLoggedTs.current) return;
-    lastLoggedTs.current = edge.ts;
-    if (edge.source === "webcam") return;
-    const latency = edge.latency || 0;
+    if (!shelf1.ts || shelf1.ts === lastLoggedTs.current) return;
+    lastLoggedTs.current = shelf1.ts;
+    const latency = shelf1.latency || 0;
     latencies.current = [...latencies.current.slice(-29), latency];
     const avg = Math.round(latencies.current.reduce((a, b) => a + b, 0) / latencies.current.length);
     setTotalRuns((n) => n + 1);
     setAvgLatency(avg);
-    setInferLog((prev) => [{ time: formatTime(new Date()), latency, counts: edge.counts, detections: [], id: Date.now() }, ...prev.slice(0, 49)]);
-  }, [edge.ts, edge.source, edge.latency, edge.counts]);
+    setInferLog((prev) => [{ time: formatTime(new Date()), latency, counts: shelf1.counts, detections: [], id: Date.now(), shelf: "S1" }, ...prev.slice(0, 49)]);
+  }, [shelf1.ts, shelf1.latency, shelf1.counts]);
 
-  // ── Draw YOLO boxes on overlay canvas ─────────────────────────
-  const drawBoxes = useCallback((detections, vw, vh) => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    canvas.width = vw; canvas.height = vh;
-    const ctx = canvas.getContext("2d");
-    ctx.clearRect(0, 0, vw, vh);
-    const COLORS = { bottle: "#38BDF8", snack: "#F97316", cup: "#22C55E" };
-    detections.forEach(({ x1, y1, x2, y2, label }) => {
-      const color = COLORS[label] ?? "#FFFFFF";
-      const cx = (x1 + x2) / 2, cy = (y1 + y2) / 2;
-      // single colored dot per detection (no box, no confidence label)
-      ctx.beginPath();
-      ctx.arc(cx, cy, 6, 0, Math.PI * 2);
-      ctx.fillStyle = color;
-      ctx.fill();
-      ctx.lineWidth = 1.5;
-      ctx.strokeStyle = "rgba(0,0,0,0.5)"; // thin outline so it reads on any bg
-      ctx.stroke();
-    });
+  // Shelf 2 phone-camera inference results → History log.
+  const onPhoneInference = useCallback((data) => {
+    const latency = data.latency ?? 0;
+    latencies.current = [...latencies.current.slice(-29), latency];
+    const avg = Math.round(latencies.current.reduce((a, b) => a + b, 0) / latencies.current.length);
+    setTotalRuns((n) => n + 1);
+    setAvgLatency(avg);
+    setInferLog((prev) => [{ time: formatTime(new Date()), latency, counts: data.counts, detections: data.detections, id: Date.now(), shelf: "S2" }, ...prev.slice(0, 49)]);
   }, []);
-
-  // ── Webcam: capture frame → /detect → draw boxes. The backend ingests the
-  //    counts into the same alert engine, so stock + alerts flow back via SSE. ─
-  const runDetection = useCallback(async () => {
-    const video   = videoRef.current;
-    const capture = captureRef.current;
-    if (!video || !capture || video.readyState < 2) return;
-    const vw = video.videoWidth || 640, vh = video.videoHeight || 480;
-    capture.width = vw; capture.height = vh;
-    capture.getContext("2d").drawImage(video, 0, 0, vw, vh);
-    const dataUrl = capture.toDataURL("image/jpeg", 0.8);
-    try {
-      const res  = await fetch("/detect", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ image: dataUrl }) });
-      const data = await res.json();
-      if (!data.detections) return;
-      drawBoxes(data.detections, vw, vh);
-      const latency = data.latency ?? 0;
-      latencies.current = [...latencies.current.slice(-29), latency];
-      const avg = Math.round(latencies.current.reduce((a, b) => a + b, 0) / latencies.current.length);
-      setTotalRuns((n) => n + 1);
-      setAvgLatency(avg);
-      setInferLog((prev) => [{ time: formatTime(new Date()), latency, counts: data.counts, detections: data.detections, id: Date.now() }, ...prev.slice(0, 49)]);
-    } catch { /* backend not reachable */ }
-  }, [drawBoxes]);
-
-  const startCamera = useCallback(async () => {
-    setCamState("requesting"); setCamError("");
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } } });
-      streamRef.current = stream;
-      if (videoRef.current) { videoRef.current.srcObject = stream; await videoRef.current.play(); }
-      inferRef.current = setInterval(runDetection, 2000);
-      setCamState("active");
-    } catch (err) { setCamState("error"); setCamError(err.message || "Could not open webcam"); }
-  }, [runDetection]);
-
-  const stopCamera = useCallback(() => {
-    clearInterval(inferRef.current);
-    streamRef.current?.getTracks().forEach((tr) => tr.stop());
-    streamRef.current = null;
-    if (videoRef.current) { videoRef.current.srcObject = null; }
-    if (canvasRef.current) { const ctx = canvasRef.current.getContext("2d"); ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height); }
-    setCamState("idle");
-  }, []);
-
-  // Switching to (or staying on) edge mode tears down any webcam stream.
-  useEffect(() => { if (camSource !== "webcam") stopCamera(); }, [camSource]); // eslint-disable-line
-  useEffect(() => () => { clearInterval(inferRef.current); streamRef.current?.getTracks().forEach((tr) => tr.stop()); }, []);
-
-  const webcamLive = camSource === "webcam" && camState === "active";
-  const liveOn    = camSource === "edge" ? (edge.connected && hasData) : camState === "active";
-  const liveLabel = camSource === "edge"
-    ? (edge.connected ? (hasData ? "LIVE" : "LISTENING") : "OFFLINE")
-    : (camState === "active" ? "LIVE" : camState === "requesting" ? "CONNECTING…" : "OFFLINE");
 
   const NAV = [
     { id: "dashboard",  label: "Dashboard", icon: "dashboard" },
@@ -803,8 +940,8 @@ export default function SmartShelfDashboard() {
 
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
             <span style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 10.5, color: textSecondary, whiteSpace: "nowrap", fontFamily: FONT_MONO, padding: "5px 10px", borderRadius: 999, border: `1px solid ${border}`, background: dark ? "rgba(255,255,255,0.02)" : "rgba(0,0,0,0.02)" }}>
-              <span className={edge.connected ? "rats-blink" : ""} style={{ width: 7, height: 7, borderRadius: "50%", background: edge.connected ? green : alertRed, display: "inline-block", boxShadow: edge.connected ? `0 0 8px ${green}` : "none" }} />
-              {edge.connected ? "server linked" : "server offline"}
+              <span className={serverLinked ? "rats-blink" : ""} style={{ width: 7, height: 7, borderRadius: "50%", background: serverLinked ? green : alertRed, display: "inline-block", boxShadow: serverLinked ? `0 0 8px ${green}` : "none" }} />
+              {serverLinked ? "server linked" : "server offline"}
             </span>
             <button className="rats-btn" onClick={() => setDark((d) => !d)} title="Toggle theme" aria-label="Toggle theme" style={{ display: "grid", placeItems: "center", width: 34, height: 34, border: `1px solid ${border}`, background: surfaceAlt, color: textSecondary, borderRadius: 10, cursor: "pointer" }}>
               <Icon name={dark ? "sun" : "moon"} size={16} />
@@ -849,112 +986,39 @@ export default function SmartShelfDashboard() {
             </div>
           </div>
 
-          {/* CAMERA PANEL + STOCK (side by side) */}
-          <div style={{ display: "flex", flexDirection: "row", flexWrap: "wrap", gap: 16, alignItems: "flex-start" }}>
-            <div className="rats-card" style={{ flex: "2 1 480px", minWidth: 0, background: surfaceAlt, border: `1px solid ${border}`, borderRadius: 12, overflow: "hidden" }}>
+          {/* TWO SHELVES — side by side, each its own pipeline */}
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(380px, 1fr))", gap: 20, alignItems: "start" }}>
 
-              {/* Top bar: source toggle + status */}
-              <div style={{ padding: "8px 14px", borderBottom: `1px solid ${border}`, display: "flex", alignItems: "center", gap: 12 }}>
-                <div style={{ display: "flex", background: bg, border: `1px solid ${border}`, borderRadius: 8, overflow: "hidden", flexShrink: 0 }}>
-                  {[
-                    { id: "edge",   label: "Edge (XIAO)", icon: "cpu" },
-                    { id: "webcam", label: "Webcam",      icon: "camera" },
-                  ].map((src, i) => {
-                    const active = camSource === src.id;
-                    return (
-                      <button key={src.id} className="rats-btn" onClick={() => setCamSource(src.id)} style={{ display: "flex", alignItems: "center", gap: 7, padding: "6px 13px", border: "none", borderRight: i === 0 ? `1px solid ${border}` : "none", background: active ? accent + "1F" : "transparent", color: active ? textPrimary : textSecondary, fontFamily: font, fontSize: 11.5, fontWeight: active ? 600 : 500, cursor: "pointer" }}>
-                        <Icon name={src.icon} size={14} color={active ? accent : textSecondary} /> {src.label}
-                      </button>
-                    );
-                  })}
-                </div>
+            {/* ── SHELF 1 — XIAO ESP32 + FOMO (edge) ───────────────────────── */}
+            <ShelfColumn
+              t={t}
+              title="Shelf 1"
+              subtitle="XIAO ESP32-S3 · FOMO (on-device edge AI)"
+              accentColor="#38BDF8"
+              shelf={shelf1}
+              liveLabel={shelf1.connected ? (shelf1.ts > 0 ? "LIVE" : "LISTENING") : "OFFLINE"}
+              viewport={<EdgeNodePanel t={t} edge={shelf1} />}
+            />
 
-                <span style={{ flex: 1, fontSize: 11, color: textSecondary, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                  {camSource === "edge" ? "Edge device → server · counts & alerts only" : "Local webcam → YOLO backend"}
-                </span>
-
-                <span style={{ display: "flex", alignItems: "center", gap: 6, color: liveOn ? alertRed : textSecondary, fontWeight: 700, fontSize: 10.5, whiteSpace: "nowrap", letterSpacing: ".06em", fontFamily: FONT_MONO }}>
-                  {liveOn && <span className="rats-blink" style={{ width: 7, height: 7, borderRadius: "50%", background: alertRed, display: "inline-block" }} />}
-                  {liveLabel}
-                </span>
-              </div>
-
-              {/* Hidden capture canvas (off-screen) */}
-              <canvas ref={captureRef} style={{ display: "none" }} />
-
-              {camSource === "edge" ? (
-                <EdgeNodePanel t={t} edge={edge} />
-              ) : (
-                <>
-                  {/* Webcam viewport */}
-                  <div style={{ position: "relative", width: "100%", aspectRatio: "16/7", background: t.camBg, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden" }}>
-                    <video ref={videoRef} muted playsInline style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "contain", display: webcamLive ? "block" : "none" }} />
-                    <canvas ref={canvasRef} style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "contain", pointerEvents: "none", display: webcamLive ? "block" : "none" }} />
-                    <div style={{ position: "absolute", inset: 0, boxShadow: "inset 0 0 0 1px rgba(255,255,255,0.05)", pointerEvents: "none" }} />
-                    {!webcamLive && (
-                      <div style={{ zIndex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 10, color: textSecondary, fontSize: 12.5 }}>
-                        <Icon name="camera" size={30} color={textSecondary} strokeWidth={1.5} />
-                        {camState === "error"
-                          ? <div style={{ color: alertRed }}>{camError}</div>
-                          : <div>Press <strong style={{ color: accent }}>Connect</strong> to open your webcam</div>}
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Connect / Stop button */}
-                  <div style={{ padding: "10px 14px", borderTop: `1px solid ${border}`, display: "flex", justifyContent: "center" }}>
-                    {camState !== "active"
-                      ? <button className="rats-btn" onClick={startCamera} style={{ ...btnStyle(accent, font), display: "inline-flex", alignItems: "center", gap: 8 }}><Icon name="camera" size={15} color={accent} /> Connect</button>
-                      : <button className="rats-btn" onClick={stopCamera}  style={{ ...btnStyle(alertRed, font), display: "inline-flex", alignItems: "center", gap: 8 }}><span style={{ width: 9, height: 9, background: alertRed, borderRadius: 2 }} /> Stop</button>}
-                  </div>
-                </>
-              )}
-            </div>
-
-            {/* PRODUCT STOCK GRID — sidebar beside the preview */}
-            <div style={{ flex: "1 1 280px", minWidth: 0 }}>
-              <SectionLabel color={textSecondary}>Product Stock</SectionLabel>
-              <div className="rats-stagger" style={{ display: "grid", gridTemplateColumns: "1fr", gap: 12 }}>
-                {PRODUCTS.map((p) => {
-                  const count  = stocks ? (stocks[p.id] ?? 0) : null;
-                  const status = edge.statuses?.[p.id] || statusOf(count);
-                  const alertYellow = "#F4B740";
-                  const isAlert     = status === "empty" || status === "low";
-                  const alertColor  = status === "empty" ? alertRed : alertYellow;
-                  const statusColor = { idle: textSecondary, empty: alertRed, low: alertYellow, ok: green }[status] || textSecondary;
-                  const dotColor    = isAlert ? alertColor : p.color;
-                  return (
-                    <div key={p.id} className="rats-card" style={{ background: isAlert ? (status === "empty" ? alertRed + "0C" : alertYellow + "0A") : surfaceAlt, border: `1px solid ${isAlert ? alertColor + "55" : border}`, borderRadius: 12, padding: "16px 18px", ...(isAlert ? { boxShadow: `0 0 0 1px ${alertColor}2E, 0 12px 30px -16px ${alertColor}66` } : {}) }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: 11, marginBottom: 12 }}>
-                        <span style={{ display: "grid", placeItems: "center", width: 36, height: 36, borderRadius: 10, background: `${dotColor}14`, border: `1px solid ${dotColor}30`, flexShrink: 0 }}>
-                          <Icon name={p.icon} size={19} color={dotColor} strokeWidth={1.6} />
-                        </span>
-                        <div style={{ flex: 1 }}>
-                          <div style={{ fontWeight: 600, fontSize: 14, color: textPrimary }}>{p.label}</div>
-                          <div style={{ fontSize: 10, color: statusColor, fontWeight: 700, marginTop: 2, letterSpacing: ".05em", textTransform: "uppercase" }}>{{ idle: "No data", empty: "Out of stock", low: "Low stock", ok: "In stock" }[status]}</div>
-                        </div>
-                        {isAlert && <span className="rats-blink" style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 9.5, fontWeight: 700, padding: "3px 8px", borderRadius: 6, background: alertColor + "1F", color: alertColor, border: `1px solid ${alertColor}40`, letterSpacing: ".04em" }}><Icon name="alert" size={11} color={alertColor} /> {status === "empty" ? "CRITICAL" : "WARNING"}</span>}
-                      </div>
-                      <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: isAlert ? 12 : 0 }}>
-                        <AnimatedNumber value={count} style={{ fontSize: 44, fontWeight: 700, color: count == null ? textSecondary : statusColor, lineHeight: 1 }} />
-                        {count != null && <span style={{ fontSize: 11.5, color: textSecondary }}>{count === 1 ? "unit" : "units"} detected</span>}
-                      </div>
-                      {isAlert && (
-                        <div style={{ padding: "8px 12px", borderRadius: 8, background: alertColor + "14", border: `1px solid ${alertColor}33`, fontSize: 11, color: alertColor, fontWeight: 600 }}>
-                          {status === "empty" ? "No items detected — immediate restock required" : `Only ${count} item${count === 1 ? "" : "s"} left — restock soon`}
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
+            {/* ── SHELF 2 — Phone camera + YOLO ────────────────────────────── */}
+            <ShelfColumn
+              t={t}
+              title="Shelf 2"
+              subtitle="Phone camera (IP Webcam / DroidCam) · YOLOv8"
+              accentColor="#34D399"
+              shelf={shelf2}
+              liveLabel={shelf2.ts > 0 ? "LIVE" : "READY"}
+              viewport={<PhoneShelfPanel t={t} onInference={onPhoneInference} />}
+            />
           </div>
 
-          {/* LIVE ALERTS FEED */}
-          <LiveAlertsFeed t={t} alerts={edge.alerts} />
+          {/* AGGREGATE — combined stock across both shelves */}
+          <AggregatePanel t={t} shelf1={shelf1} shelf2={shelf2} />
 
-          {/* POWER & SAVINGS (deep-sleep demo) */}
+          {/* LIVE ALERTS FEED — merged from both shelves */}
+          <LiveAlertsFeed t={t} alerts={allAlerts} />
+
+          {/* POWER & SAVINGS (deep-sleep demo — Shelf 1 / XIAO) */}
           <PowerSavingsPanel t={t} />
         </div>
       )}
