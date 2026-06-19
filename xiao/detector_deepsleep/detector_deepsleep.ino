@@ -1,5 +1,5 @@
 /*
- * R.A.T.S — XIAO ESP32-S3 Sense  ·  DEEP-SLEEP demo firmware
+ * R.A.T.S — XIAO ESP32-S3 Sense  ·  LIVE (always-on) — deep sleep DISABLED
  *
  * Battery-scenario variant of detector.ino. Proves real-world power/cost saving:
  *   • Sleeps in deep sleep (~14 µA) until the PIR AM312 sees motion.
@@ -13,9 +13,10 @@
  * Wiring (see PIR-Mode.md): AM312 VCC->3V3, GND->GND, OUT->D1/GPIO2.
  * Board: XIAO_ESP32S3 | PSRAM: OPI PSRAM | Partition: Huge APP.
  *
- * NOTE: deep sleep kills WiFi, so the device is unreachable while asleep — by
- * design. The power panel reads from the BACKEND (which keeps the last push),
- * so it stays live across sleep. For an always-on live dashboard use detector.ino.
+ * NOTE: DEEP SLEEP IS DISABLED in this build. The device stays awake, keeps WiFi
+ * up, and re-pushes telemetry every PUSH_INTERVAL_MS so the dashboard is always
+ * live. Duty cycle ≈ 100% → no battery saving (expected for always-on).
+ * Restore the original battery demo with: git checkout -- <this file>.
  */
 
 #include <RATS_FOMO_v1_inferencing.h>
@@ -35,13 +36,14 @@ SET_LOOP_TASK_STACK_SIZE(16 * 1024);
 const char* ssid        = "SK_06D0_2.4G";
 const char* password    = "AAB2F@2515";
 // The PC running server.py (python server.py on :5000). Use its LAN IP.
-const char* BACKEND_URL = "http://192.168.0.100:5000/xiao/push";
+const char* BACKEND_URL = "http://192.168.45.187:5000/xiao/push";
 
 #define PIR_GPIO        GPIO_NUM_2   // D1, RTC-capable → valid ext0 wake source
 #define AWAKE_HOLD_MS   15000        // stay awake this long after the last motion
 #define PIR_WARMUP_MS   30000        // AM312 settle time, COLD BOOT only
 #define INFER_INTERVAL_MS 700
 #define DET_THRESHOLD   0.60f
+#define PUSH_INTERVAL_MS  3000        // always-on: re-push telemetry this often
 
 /* ── Persists across deep sleep (RTC slow memory) ────────────────────────── */
 RTC_DATA_ATTR uint32_t rtc_boot_count = 0;
@@ -72,6 +74,7 @@ static bool     camera_ready  = false;
 static uint8_t* snapshot_buf  = nullptr;
 static uint32_t last_infer_ms = 0;
 static uint32_t last_motion_ms = 0;
+static uint32_t last_push_ms   = 0;
 
 #define MAX_CLASSES 8
 static int      latest_count[MAX_CLASSES] = {0};
@@ -175,8 +178,8 @@ String counts_json() {
 // POST accumulated power telemetry to the backend. 'event' is "wake" or "sleep".
 void push_power(const char* event) {
   if (WiFi.status() != WL_CONNECTED) return;
-  uint64_t awake = rtc_awake_us;
-  if (strcmp(event, "sleep") == 0) awake += esp_timer_get_time() - wake_start_us;
+  // Always-on: count the whole current awake window so duty ≈ 100%.
+  uint64_t awake = rtc_awake_us + (esp_timer_get_time() - wake_start_us);
   String body = "{\"event\":\"" + String(event) + "\"";
   body += ",\"boot_count\":" + String(rtc_boot_count);
   body += ",\"awake_us\":" + String((uint32_t)(awake / 1000ULL)) + "000"; // keep within String range
@@ -254,21 +257,28 @@ void setup() {
     Serial.println("WiFi failed — inference only this wake");
   }
 
-  // On a cold power-up the AM312 needs to settle; ignore it briefly so we don't
-  // immediately re-sleep on a boot-time false trigger.
-  if (cold_boot) { Serial.println("AM312 warm-up…"); delay(PIR_WARMUP_MS); }
+  // Always-on (no deep sleep) → no PIR warm-up gating needed; go live immediately.
   last_motion_ms = millis();
+  last_push_ms   = millis();
 }
 
 void loop() {
+  // Always-on / "live" mode: never deep-sleeps. Keeps WiFi + web server up and
+  // re-pushes telemetry every PUSH_INTERVAL_MS so the dashboard stays live.
+  if (WiFi.status() != WL_CONNECTED) {            // auto-reconnect if the AP drops us
+    WiFi.begin(ssid, password);
+    for (int i = 0; i < 20 && WiFi.status() != WL_CONNECTED; i++) delay(250);
+    if (WiFi.status() == WL_CONNECTED) { Serial.print("re-IP: "); Serial.println(WiFi.localIP()); }
+  }
   if (WiFi.status() == WL_CONNECTED) server.handleClient();
-
-  if (digitalRead(PIR_GPIO) == HIGH) last_motion_ms = millis();  // recent motion
 
   if (millis() - last_infer_ms >= INFER_INTERVAL_MS) {
     last_infer_ms = millis();
     run_inference();
   }
 
-  if (millis() - last_motion_ms >= AWAKE_HOLD_MS) go_to_sleep();
+  if (millis() - last_push_ms >= PUSH_INTERVAL_MS) {
+    last_push_ms = millis();
+    push_power("wake");                            // keeps state=AWAKE + fresh counts
+  }
 }
