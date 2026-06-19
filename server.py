@@ -187,6 +187,36 @@ def xiao_counts():
     result["w"], result["h"] = w, h
     return jsonify(result)
 
+# ── Phone IP-camera (Shelf 2) ──────────────────────────────────────────────
+# A phone running DroidCam / IP Webcam exposes an MJPEG stream (e.g.
+# http://<phone-ip>:4747/video). It reuses the exact same proxy-and-infer path
+# as the XIAO stream above: the backend holds the single MJPEG connection,
+# re-streams it to the browser, and runs YOLO on the latest frame. These are
+# thin aliases so the frontend can speak in "phone" terms.
+@app.route("/phone_start", methods=["POST"])
+def phone_start():
+    # Unlike the XIAO (whose endpoint is always /stream), phone apps use varied
+    # paths (DroidCam → /video, IP Webcam → /video), so pass the URL through
+    # as-is instead of normalizing to /stream.
+    raw = ((request.get_json(force=True) or {}).get("url") or "").strip()
+    p = urlparse(raw)
+    if not p.scheme or not p.netloc:
+        return jsonify({"error": "Invalid url"}), 400
+    xiao.start(raw)
+    return jsonify({"status": "started", "url": raw})
+
+@app.route("/phone_stop", methods=["POST"])
+def phone_stop():
+    return xiao_stop()
+
+@app.route("/phone_stream")
+def phone_stream():
+    return xiao_stream()
+
+@app.route("/phone_counts")
+def phone_counts():
+    return xiao_counts()
+
 @app.route("/health")
 def health():
     return jsonify({"status": "ok", "classes": model.names})
